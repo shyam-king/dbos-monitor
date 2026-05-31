@@ -188,7 +188,7 @@ wheels = [
 
 [[package]]
 name = "dbos-monitor-client"
-version = "0.0.1"
+version = "0.0.3"
 source = { editable = "packages/dbos-monitor-client" }
 dependencies = [
     { name = "httpx" },
@@ -208,7 +208,7 @@ provides-extras = ["dbos"]
 
 [[package]]
 name = "dbos-monitor-service"
-version = "0.0.1"
+version = "0.0.3"
 source = { editable = "packages/dbos-monitor-service" }
 dependencies = [
     { name = "fastapi" },
