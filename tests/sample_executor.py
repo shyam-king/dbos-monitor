@@ -6,7 +6,8 @@ Usage:
 
 --type sets the executor type reported to the monitor (default "worker"); reassignment
 only happens between executors of the same type.
-When --start-workflow is passed, starts a sample workflow and prints its ID to stdout.
+When --start-workflow is passed, starts --num-workflows (default 1) sample workflows and
+prints each workflow ID to stdout, one per line.
 Otherwise, just launches DBOS (triggering recovery) and waits for workflows to complete.
 """
 
@@ -20,7 +21,12 @@ logger = logging.getLogger("sample_executor")
 
 
 async def run_executor(
-	postgres_url: str, executor_id: str, monitor_url: str, start_workflow: bool, executor_type: str = "worker"
+	postgres_url: str,
+	executor_id: str,
+	monitor_url: str,
+	start_workflow: bool,
+	executor_type: str = "worker",
+	num_workflows: int = 1,
 ):
 	# Logs go to stderr; stdout is reserved for the workflow-ID line the test reads.
 	logging.basicConfig(
@@ -83,10 +89,11 @@ async def run_executor(
 	logger.info("Heartbeat client started, reporting to %s", monitor_url)
 
 	if start_workflow:
-		handle = await DBOS.start_workflow_async(multi_step_workflow)
-		workflow_id = handle.get_workflow_id()
-		logger.info("Started workflow %s", workflow_id)
-		print(workflow_id, flush=True)
+		for _ in range(num_workflows):
+			handle = await DBOS.start_workflow_async(multi_step_workflow)
+			workflow_id = handle.get_workflow_id()
+			logger.info("Started workflow %s", workflow_id)
+			print(workflow_id, flush=True)
 
 	logger.info("Executor %s running; waiting for workflows", executor_id)
 	try:
@@ -106,4 +113,5 @@ if __name__ == "__main__":
 	monitor_url = sys.argv[3]
 	start_wf = "--start-workflow" in sys.argv
 	executor_type = sys.argv[sys.argv.index("--type") + 1] if "--type" in sys.argv else "worker"
-	asyncio.run(run_executor(postgres_url, executor_id, monitor_url, start_wf, executor_type))
+	num_workflows = int(sys.argv[sys.argv.index("--num-workflows") + 1]) if "--num-workflows" in sys.argv else 1
+	asyncio.run(run_executor(postgres_url, executor_id, monitor_url, start_wf, executor_type, num_workflows))

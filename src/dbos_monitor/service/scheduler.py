@@ -47,10 +47,11 @@ async def _run_reassignment_cycle(config: MonitorConfig, monitor_db: MonitorDB, 
 
 		if reassigned:
 			logger.info(
-				"Reassigned %d workflows from %s to %s",
+				"Reassigned %d workflows from %s to %s: %s",
 				len(reassigned),
 				executor.executor_id,
 				target.executor_id,
+				", ".join(reassigned),
 			)
 			await monitor_db.mark_recovery_needed(target.executor_id)
 			await monitor_db.remove_executor(executor.executor_id)

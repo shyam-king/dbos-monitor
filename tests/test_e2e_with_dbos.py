@@ -13,6 +13,7 @@ Requires: Docker (for testcontainers) or TEST_POSTGRES_URL env var.
 import asyncio
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -37,9 +38,14 @@ LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
 @pytest.fixture
 def e2e_log_dir(request):
-	"""A gitignored directory under the repo root collecting all logs for this test run."""
+	"""A gitignored directory under the repo root collecting all logs for this test run.
+
+	Wiped at the start of each run so logs reflect only the current run (within a run, logs
+	are appended so a restarted executor keeps its history).
+	"""
 	log_dir = os.path.join(REPO_ROOT, "e2e-logs", request.node.name)
-	os.makedirs(log_dir, exist_ok=True)
+	shutil.rmtree(log_dir, ignore_errors=True)
+	os.makedirs(log_dir)
 	return log_dir
 
 
@@ -97,8 +103,10 @@ def _start_executor(
 	start_workflow: bool,
 	log_dir: str,
 	executor_type: str = "worker",
+	num_workflows: int = 1,
 ):
 	args = [sys.executable, SAMPLE_EXECUTOR, postgres_url, executor_id, monitor_url, "--type", executor_type]
+	args += ["--num-workflows", str(num_workflows)]
 	if start_workflow:
 		args.append("--start-workflow")
 	# Executor logs go to stderr -> a per-executor file; stdout (PIPE) carries the workflow ID.
@@ -279,3 +287,42 @@ async def test_multi_type_concurrent_crash_and_recovery(monitor_server, postgres
 	assert await _get_workflow_executor(postgres_url, wf1) == "type1-b"
 	assert await _get_workflow_executor(postgres_url, wf2) in {"type2-a", "type2-b"}
 	assert await _get_workflow_executor(postgres_url, wf3) in {"type3-b", "type3-c"}
+
+
+async def test_multiple_workflows_recovered_simultaneously(monitor_server, postgres_url, e2e_log_dir):
+	"""
+	executor-a starts several concurrent workflows and crashes. The monitor reassigns all of
+	its PENDING workflows to the same-type standby executor-b in one cycle, and executor-b
+	recovers them all simultaneously.
+	"""
+	monitor_url = monitor_server
+	num_workflows = 5
+
+	proc_a, log_a = _start_executor(
+		postgres_url, "executor-a", monitor_url, True, e2e_log_dir, num_workflows=num_workflows
+	)
+	proc_b, log_b = _start_executor(postgres_url, "executor-b", monitor_url, False, e2e_log_dir)
+
+	# Each started workflow prints its ID on its own line.
+	workflow_ids = [proc_a.stdout.readline().strip() for _ in range(num_workflows)]
+	assert all(workflow_ids) and len(set(workflow_ids)) == num_workflows, (
+		f"Expected {num_workflows} distinct workflow IDs, got {workflow_ids}. See logs in {e2e_log_dir}"
+	)
+
+	# Let them all start running and register heartbeats.
+	await asyncio.sleep(2)
+	for wf in workflow_ids:
+		assert await _get_workflow_status(postgres_url, wf) == "PENDING"
+
+	# Crash executor-a: the monitor must reassign all PENDING workflows to executor-b at once.
+	_kill(proc_a, log_a)
+
+	statuses = await _await_all_success(postgres_url, workflow_ids, timeout=60)
+
+	_kill(proc_b, log_b)
+
+	assert all(s == "SUCCESS" for s in statuses.values()), (
+		f"Not all workflows completed: {statuses}\nSee logs in {e2e_log_dir}"
+	)
+	for wf in workflow_ids:
+		assert await _get_workflow_executor(postgres_url, wf) == "executor-b"
