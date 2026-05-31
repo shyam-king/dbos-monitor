@@ -292,9 +292,7 @@ async def test_orphan_workflow_reassigned_by_inferred_type(running_app, postgres
 	# An untracked "ghost" executor left an "ingest" workflow PENDING.
 	await _insert_pending_workflow(postgres_url, "wf-orphan", "ghost")
 	async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as conn:
-		await conn.execute(
-			"UPDATE dbos.workflow_status SET name = 'ingest' WHERE workflow_uuid = 'wf-orphan'"
-		)
+		await conn.execute("UPDATE dbos.workflow_status SET name = 'ingest' WHERE workflow_uuid = 'wf-orphan'")
 
 	await _run_orphan_cycle(config, monitor_db, dbos_db)
 
