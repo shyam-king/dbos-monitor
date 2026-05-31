@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+.envrc
+**/__pycache__
+*.pyc
+e2e-logs/
+tests/
+Dockerfile
+.dockerignore
