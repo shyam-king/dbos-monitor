@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 
 from dbos_monitor.service.config import MonitorConfig
 from dbos_monitor.service.dbos_db import DbosDB
@@ -26,23 +27,37 @@ async def _run_reassignment_cycle(config: MonitorConfig, monitor_db: MonitorDB, 
 	)
 
 	for executor in unhealthy:
+		await _drain_executor(config, monitor_db, dbos_db, executor)
+
+
+async def _drain_executor(config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB, executor):
+	"""Reassign an unhealthy executor's workflows in batches until it is fully drained.
+
+	Each batch is capped at ``reassignment_max_batch_size`` and sent to a freshly chosen
+	random healthy peer, so a large backlog spreads across peers without a per-batch delay.
+	A batch smaller than the cap means nothing more is pending, so the executor is removed.
+	"""
+	batch_size = config.reassignment_max_batch_size
+	while True:
 		healthy_targets = await monitor_db.get_healthy_executors_by_type(
 			executor.executor_type,
 			grace_timeout_ms=config.executor_health_ping_grace_timeout_ms,
 		)
 		if not healthy_targets:
+			# No peer to take over yet; leave the executor in place and retry next cycle.
 			logger.debug(
 				"No healthy executors of type %r to reassign workflows from %s",
 				executor.executor_type,
 				executor.executor_id,
 			)
-			continue
+			return
 
 		target = _select_target(healthy_targets)
 		reassigned = await dbos_db.reassign_workflows(
 			old_executor_id=executor.executor_id,
 			new_executor_id=target.executor_id,
 			age_threshold_ms=config.workflows_age_threshold_ms,
+			max_batch_size=batch_size,
 		)
 
 		if reassigned:
@@ -54,10 +69,11 @@ async def _run_reassignment_cycle(config: MonitorConfig, monitor_db: MonitorDB, 
 				", ".join(reassigned),
 			)
 			await monitor_db.mark_recovery_needed(target.executor_id)
+
+		if len(reassigned) < batch_size:
 			await monitor_db.remove_executor(executor.executor_id)
-		else:
-			await monitor_db.remove_executor(executor.executor_id)
+			return
 
 
 def _select_target(healthy_executors):
-	return healthy_executors[0]
+	return random.choice(healthy_executors)

@@ -11,3 +11,4 @@ class MonitorConfig(BaseSettings):
 	dbos_postgres_connection_uri: str
 	monitor_postgres_connection_uri: str
 	reassignment_loop_interval_ms: int = 3000
+	reassignment_max_batch_size: int = 20

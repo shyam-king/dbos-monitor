@@ -21,6 +21,7 @@ class DbosDB:
 		old_executor_id: str,
 		new_executor_id: str,
 		age_threshold_ms: int | None = None,
+		max_batch_size: int = 20,
 	) -> list[str]:
 		now_ms = int(time.time() * 1000)
 		async with self._pool.connection() as conn:
@@ -33,6 +34,8 @@ class DbosDB:
                         WHERE status = 'PENDING'
                           AND executor_id = %(old_id)s
                           AND (%(threshold)s::BIGINT IS NULL OR created_at >= %(threshold)s)
+                        ORDER BY created_at
+                        LIMIT %(limit)s
                         FOR UPDATE SKIP LOCKED
                     )
                     UPDATE dbos.workflow_status ws
@@ -46,6 +49,7 @@ class DbosDB:
 						"old_id": old_executor_id,
 						"new_id": new_executor_id,
 						"threshold": age_threshold_ms,
+						"limit": max_batch_size,
 						"now": now_ms,
 					},
 				)

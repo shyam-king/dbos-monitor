@@ -205,3 +205,38 @@ async def test_multiple_workflows_reassigned(running_app, postgres_url):
 	for i in range(5):
 		executor = await _get_workflow_executor(postgres_url, f"wf-multi-{i}")
 		assert executor == "executor-d"
+
+
+async def test_reassignment_drains_in_batches(running_app, postgres_url):
+	"""With a batch size smaller than the backlog, a single cycle still drains the executor,
+	spreading batches across the healthy same-type peers."""
+	client, config, monitor_db, dbos_db = running_app
+	config.reassignment_max_batch_size = 2  # 5 workflows -> 3 batches
+
+	for i in range(5):
+		await _insert_pending_workflow(postgres_url, f"wf-batch-{i}", "executor-e")
+
+	# Crashed executor-e plus two healthy peers of the same type to receive the batches.
+	await client.post(
+		"/heartbeat",
+		json={"executor_id": "executor-e", "executor_type": "batchpool", "health_ping_interval_ms": 200},
+	)
+	for peer in ("executor-f", "executor-g"):
+		await client.post(
+			"/heartbeat",
+			json={"executor_id": peer, "executor_type": "batchpool", "health_ping_interval_ms": 5000},
+		)
+
+	# Wait for executor-e to become unhealthy (ping_interval 200ms + grace 500ms).
+	await asyncio.sleep(1.0)
+
+	# A single cycle drains all 5 workflows despite the batch size of 2.
+	await _run_reassignment_cycle(config, monitor_db, dbos_db)
+
+	for i in range(5):
+		executor = await _get_workflow_executor(postgres_url, f"wf-batch-{i}")
+		assert executor in ("executor-f", "executor-g")
+
+	# The drained executor is removed from the monitor.
+	remaining = {e["executor_id"] for e in await monitor_db.get_all_executors(grace_timeout_ms=500)}
+	assert "executor-e" not in remaining

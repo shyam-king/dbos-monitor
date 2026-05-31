@@ -119,6 +119,7 @@ client.start()
 | `DBOS_MONITOR_UNKNOWN_EXECUTOR_HEALTH_PING_TIMEOUT_MS` | Timeout for first ping from discovered executor | `30000` |
 | `DBOS_MONITOR_WORKFLOWS_AGE_THRESHOLD_MS` | Ignore workflows older than this (epoch ms) | `None` |
 | `DBOS_MONITOR_REASSIGNMENT_LOOP_INTERVAL_MS` | How often the reassignment loop runs | `3000` |
+| `DBOS_MONITOR_REASSIGNMENT_MAX_BATCH_SIZE` | Max workflows reassigned to a peer per batch | `20` |
 | `DBOS_MONITOR_LOG_LEVEL` | Logging level | `INFO` |
 
 ### Client SDK Parameters
