@@ -1,0 +1,20 @@
+[project]
+name = "dbos-monitor-client"
+version = "0.0.1"
+description = "Thin client SDK for the dbos-monitor service: heartbeats and DBOS recovery triggering"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Only needed if you rely on the default on_recovery_needed handler, which triggers
+# DBOS's built-in recovery. Omit it if you pass your own callback.
+dbos = ["dbos>=1.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbos_monitor_client"]

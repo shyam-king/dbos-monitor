@@ -76,10 +76,33 @@ DBOS_MONITOR_MONITOR_POSTGRES_CONNECTION_URI="postgresql://user:pass@host:5432/m
 uv run uvicorn dbos_monitor.service.app:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
+### Installing the Client SDK
+
+The client ships as its own lightweight package, `dbos-monitor-client` (only depends on
+`httpx`, plus an optional `dbos` extra) — so installing it does **not** pull in the server's
+dependencies. It lives in this repo under `packages/dbos-monitor-client`.
+
+It is not published to PyPI yet, so install it directly from a tagged GitHub revision,
+pointing at the package subdirectory. Browse the available versions at
+[github.com/shyam-king/dbos-monitor/tags](https://github.com/shyam-king/dbos-monitor/tags),
+then pin the tag you want (e.g. `v0.0.1`):
+
+```bash
+# uv
+uv add "dbos-monitor-client[dbos] @ git+https://github.com/shyam-king/dbos-monitor@v0.0.1#subdirectory=packages/dbos-monitor-client"
+
+# pip
+pip install "dbos-monitor-client[dbos] @ git+https://github.com/shyam-king/dbos-monitor@v0.0.1#subdirectory=packages/dbos-monitor-client"
+```
+
+The `[dbos]` extra installs the `dbos` package, needed only for the default recovery handler
+(which triggers DBOS's built-in recovery). Drop it if you pass your own `on_recovery_needed`
+callback.
+
 ### Integrating the Client SDK
 
 ```python
-from dbos_monitor.client.heartbeat import DBOSMonitorClient
+from dbos_monitor_client import DBOSMonitorClient
 
 # The default on_recovery_needed handler automatically triggers DBOS recovery,
 # so no custom callback is needed for standard usage.
@@ -88,25 +111,6 @@ client = DBOSMonitorClient(
     executor_id="my-executor-id",
     executor_type="worker",
     health_ping_interval_ms=5000,
-)
-client.start()
-```
-
-If you need custom recovery logic, pass your own callback:
-
-```python
-from dbos_monitor.client.heartbeat import DBOSMonitorClient
-
-def my_recovery_callback():
-    # Custom recovery logic here
-    ...
-
-client = DBOSMonitorClient(
-    monitor_url="http://localhost:8000",
-    executor_id="my-executor-id",
-    executor_type="worker",
-    health_ping_interval_ms=5000,
-    on_recovery_needed=my_recovery_callback,
 )
 client.start()
 ```
@@ -139,8 +143,8 @@ client.start()
 ## Development
 
 ```bash
-# Install with dev dependencies
-uv sync --all-extras
+# Install both workspace packages plus dev/test dependencies
+uv sync
 ```
 
 ### Running Tests

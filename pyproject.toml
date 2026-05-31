@@ -1,33 +1,24 @@
-[project]
-name = "dbos-monitor"
-version = "0.1.0"
-description = "Open-source executor health monitoring and workflow re-assignment for DBOS-transact"
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "psycopg[binary]>=3.1",
-    "psycopg-pool>=3.1",
-    "pydantic-settings>=2.0",
-    "httpx>=0.27",
-]
+# Virtual workspace root: groups the two distributable packages under packages/.
+# It is not itself a published package — the client and service each have their own
+# pyproject.toml so they can be installed independently with only their own deps.
+[tool.uv.workspace]
+members = ["packages/*"]
 
-[project.optional-dependencies]
+[tool.uv.sources]
+dbos-monitor-client = { workspace = true }
+dbos-monitor-service = { workspace = true }
+
+[dependency-groups]
+# Installed by `uv sync` for local development and tests across both packages.
 dev = [
+    "dbos-monitor-client[dbos]",
+    "dbos-monitor-service",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "testcontainers[postgres]>=4.0",
     "dbos>=1.3",
     "ruff>=0.15",
 ]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/dbos_monitor"]
 
 [tool.ruff]
 indent-width = 4
@@ -40,15 +31,15 @@ indent-style = "tab"
 select = ["E", "F", "I", "W"]
 ignore = ["W191", "E101"]
 
+[tool.ruff.lint.isort]
+# The virtual workspace root has no [project], so ruff can't auto-detect our own
+# packages; list them so imports stay grouped separately from third-party.
+known-first-party = ["dbos_monitor", "dbos_monitor_client"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
 markers = [
     "integration: tests requiring Docker/Postgres",
-]
-
-[dependency-groups]
-dev = [
-    "dbos-monitor[dev]",
 ]

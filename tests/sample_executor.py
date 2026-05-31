@@ -77,7 +77,7 @@ async def run_executor(
 	DBOS.launch()
 	logger.info("DBOS launched for executor %s", executor_id)
 
-	from dbos_monitor.client.heartbeat import DBOSMonitorClient
+	from dbos_monitor_client import DBOSMonitorClient
 
 	monitor_client = DBOSMonitorClient(
 		monitor_url=monitor_url,

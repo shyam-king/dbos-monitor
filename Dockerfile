@@ -9,16 +9,20 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
-# Install dependencies first (cached layer, independent of source changes).
+# Install only the service package's dependencies first (cached layer, independent of
+# source changes). The workspace manifests are needed to resolve; --package limits the
+# install to dbos-monitor-service so the client and its deps are left out of the image.
 RUN --mount=type=cache,target=/root/.cache/uv \
 	--mount=type=bind,source=uv.lock,target=uv.lock \
 	--mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-	uv sync --locked --no-install-project --no-dev
+	--mount=type=bind,source=packages/dbos-monitor-service/pyproject.toml,target=packages/dbos-monitor-service/pyproject.toml \
+	--mount=type=bind,source=packages/dbos-monitor-client/pyproject.toml,target=packages/dbos-monitor-client/pyproject.toml \
+	uv sync --locked --no-install-workspace --no-dev --package dbos-monitor-service
 
-# Install the project itself.
+# Install the service package itself.
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
-	uv sync --locked --no-dev
+	uv sync --locked --no-dev --package dbos-monitor-service
 
 # --- Runtime stage: slim image carrying only the venv and source ---
 FROM python:3.12-slim-bookworm

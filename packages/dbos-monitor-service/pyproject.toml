@@ -1,0 +1,19 @@
+[project]
+name = "dbos-monitor-service"
+version = "0.0.1"
+description = "Executor health monitoring and workflow re-assignment service for DBOS-transact"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "psycopg[binary]>=3.1",
+    "psycopg-pool>=3.1",
+    "pydantic-settings>=2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbos_monitor"]
