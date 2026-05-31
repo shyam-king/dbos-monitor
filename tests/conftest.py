@@ -6,7 +6,6 @@ import pytest
 import pytest_asyncio
 from testcontainers.postgres import PostgresContainer
 
-
 DOCKER_SETUP_INSTRUCTIONS = """\
 This test needs a Postgres database. Provide one of the following:
 
