@@ -1,9 +1,23 @@
+import contextlib
 import os
 
 import psycopg
 import pytest
 import pytest_asyncio
 from testcontainers.postgres import PostgresContainer
+
+
+DOCKER_SETUP_INSTRUCTIONS = """\
+This test needs a Postgres database. Provide one of the following:
+
+  1. Set TEST_POSTGRES_URL to point at a running Postgres instance, e.g.:
+       export TEST_POSTGRES_URL="postgresql://postgres:postgres@localhost:5432/postgres"
+
+  2. Or run Docker so testcontainers can spin up Postgres automatically.
+     If Docker is running but not auto-detected, set DOCKER_HOST, e.g.:
+       export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"   # Docker Desktop on macOS
+       export DOCKER_HOST="unix:///var/run/docker.sock"            # Linux
+"""
 
 
 @pytest.fixture(scope="session")
@@ -13,10 +27,23 @@ def postgres_url():
 		yield url
 		return
 
-	with PostgresContainer("postgres:16-alpine", driver=None) as pg:
-		host = pg.get_container_host_ip()
-		port = pg.get_exposed_port(5432)
-		yield f"postgresql://{pg.username}:{pg.password}@{host}:{port}/{pg.dbname}"
+	container = None
+	try:
+		container = PostgresContainer("postgres:16-alpine", driver=None)
+		container.start()
+	except Exception as exc:
+		if container is not None:
+			# clean up if start() failed after the container was created
+			with contextlib.suppress(Exception):
+				container.stop()
+		pytest.skip(f"Could not start Postgres via Docker: {exc}\n\n{DOCKER_SETUP_INSTRUCTIONS}")
+
+	try:
+		host = container.get_container_host_ip()
+		port = container.get_exposed_port(5432)
+		yield f"postgresql://{container.username}:{container.password}@{host}:{port}/{container.dbname}"
+	finally:
+		container.stop()
 
 
 @pytest_asyncio.fixture(scope="session")

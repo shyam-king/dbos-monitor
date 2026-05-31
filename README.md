@@ -164,5 +164,16 @@ Or let testcontainers manage it automatically (requires Docker socket access):
 DOCKER_HOST=unix://$HOME/.docker/run/docker.sock uv run pytest tests/ -v
 ```
 
+> **Why `DOCKER_HOST`?** The Docker CLI may work via its configured context, but the
+> Python SDK that testcontainers uses defaults to `/var/run/docker.sock`. On Docker
+> Desktop for macOS that socket doesn't exist, so you must point `DOCKER_HOST` at the
+> real socket:
+>
+> - macOS (Docker Desktop): `unix://$HOME/.docker/run/docker.sock`
+> - Linux: `unix:///var/run/docker.sock`
+>
+> If neither `TEST_POSTGRES_URL` nor a reachable Docker socket is available, the
+> integration and E2E tests are **skipped** (not failed) with these same instructions.
+
 # Authors
 - shyam-king
