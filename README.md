@@ -175,5 +175,23 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock uv run pytest tests/ -v
 > If neither `TEST_POSTGRES_URL` nor a reachable Docker socket is available, the
 > integration and E2E tests are **skipped** (not failed) with these same instructions.
 
+To avoid prefixing every command, use [direnv](https://direnv.net/) to set `DOCKER_HOST`
+automatically whenever you enter the project directory. Create a `.envrc` file in the
+project root:
+
+```bash
+# .envrc — adjust the socket path for your platform (see above)
+export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock
+```
+
+Then allow it once:
+
+```bash
+direnv allow
+```
+
+Now `uv run pytest tests/ -v` picks up `DOCKER_HOST` without any prefix. `.envrc` is
+git-ignored, so your local socket path stays out of version control.
+
 # Authors
 - shyam-king
