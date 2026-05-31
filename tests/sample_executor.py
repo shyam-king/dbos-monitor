@@ -2,19 +2,36 @@
 Sample DBOS executor process for E2E testing.
 
 Usage:
-    python sample_executor.py <postgres_url> <executor_id> <monitor_url> [--start-workflow]
+    python sample_executor.py <postgres_url> <executor_id> <monitor_url> [--type <type>] [--start-workflow]
 
+--type sets the executor type reported to the monitor (default "worker"); reassignment
+only happens between executors of the same type.
 When --start-workflow is passed, starts a sample workflow and prints its ID to stdout.
 Otherwise, just launches DBOS (triggering recovery) and waits for workflows to complete.
 """
 
+import asyncio
+import logging
 import sys
-import time
 
 from dbos import DBOS
 
+logger = logging.getLogger("sample_executor")
 
-def run_executor(postgres_url: str, executor_id: str, monitor_url: str, start_workflow: bool):
+
+async def run_executor(
+	postgres_url: str, executor_id: str, monitor_url: str, start_workflow: bool, executor_type: str = "worker"
+):
+	# Logs go to stderr; stdout is reserved for the workflow-ID line the test reads.
+	logging.basicConfig(
+		level=logging.INFO,
+		format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+		stream=sys.stderr,
+	)
+
+	logger.info(
+		"Initializing DBOS executor %s (type=%s, start_workflow=%s)", executor_id, executor_type, start_workflow
+	)
 	config = {
 		"name": "testapp",
 		"system_database_url": postgres_url,
@@ -26,47 +43,59 @@ def run_executor(postgres_url: str, executor_id: str, monitor_url: str, start_wo
 	DBOS(config=config)
 
 	@DBOS.workflow()
-	def multi_step_workflow():
-		r1 = step_one()
-		r2 = step_two(r1)
-		r3 = step_three(r2)
+	async def multi_step_workflow():
+		logger.info("workflow started workflow_id=%s", DBOS.workflow_id)
+		r1 = await step_one()
+		r2 = await step_two(r1)
+		r3 = await step_three(r2)
+		logger.info("workflow ended")
 		return r3
 
 	@DBOS.step()
-	def step_one():
+	async def step_one():
+		logger.info("step_one")
 		return "step1_done"
 
 	@DBOS.step()
-	def step_two(prev):
-		time.sleep(10)
+	async def step_two(prev):
+		logger.info("step_two_start")
+		await asyncio.sleep(10)
+		logger.info("step_two_end")
 		return f"{prev}+step2_done"
 
 	@DBOS.step()
-	def step_three(prev):
+	async def step_three(prev):
+		logger.info("step_three")
 		return f"{prev}+step3_done"
 
 	DBOS.launch()
+	logger.info("DBOS launched for executor %s", executor_id)
 
 	from dbos_monitor.client.heartbeat import DBOSMonitorClient
 
 	monitor_client = DBOSMonitorClient(
 		monitor_url=monitor_url,
 		executor_id=executor_id,
-		executor_type="worker",
+		executor_type=executor_type,
 		health_ping_interval_ms=500,
 	)
 	monitor_client.start()
+	logger.info("Heartbeat client started, reporting to %s", monitor_url)
 
 	if start_workflow:
-		handle = DBOS.start_workflow(multi_step_workflow)
-		print(handle.get_workflow_id(), flush=True)
+		handle = await DBOS.start_workflow_async(multi_step_workflow)
+		workflow_id = handle.get_workflow_id()
+		logger.info("Started workflow %s", workflow_id)
+		print(workflow_id, flush=True)
 
+	logger.info("Executor %s running; waiting for workflows", executor_id)
 	try:
 		while True:
-			time.sleep(0.1)
-	except KeyboardInterrupt:
+			await asyncio.sleep(0.1)
+	except (KeyboardInterrupt, asyncio.CancelledError):
 		pass
 	finally:
+		logger.info("Shutting down executor %s", executor_id)
 		monitor_client.stop()
 		DBOS.destroy()
 
@@ -76,4 +105,5 @@ if __name__ == "__main__":
 	executor_id = sys.argv[2]
 	monitor_url = sys.argv[3]
 	start_wf = "--start-workflow" in sys.argv
-	run_executor(postgres_url, executor_id, monitor_url, start_wf)
+	executor_type = sys.argv[sys.argv.index("--type") + 1] if "--type" in sys.argv else "worker"
+	asyncio.run(run_executor(postgres_url, executor_id, monitor_url, start_wf, executor_type))

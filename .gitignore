@@ -4,3 +4,5 @@
 .envrc
 
 **/__pycache__
+
+e2e-logs/
