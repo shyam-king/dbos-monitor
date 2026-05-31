@@ -222,6 +222,52 @@ async def test_full_executor_crash_and_recovery(monitor_server, postgres_url, e2
 	assert final_executor == "executor-b"
 
 
+async def test_recovery_after_delayed_healthy_executor(monitor_server, postgres_url, e2e_log_dir):
+	"""
+	executor-a starts a workflow and crashes while it is the only executor of its type. For
+	several monitor cycles the reassignment loop finds the workflow's owner unhealthy but has
+	no healthy peer to hand it to, so it leaves the workflow in place and retries. Once
+	executor-b finally comes up, the monitor reassigns and executor-b recovers the workflow.
+	"""
+	monitor_url = monitor_server
+
+	proc_a, log_a = _start_executor(postgres_url, "executor-a", monitor_url, True, e2e_log_dir)
+
+	workflow_id = proc_a.stdout.readline().strip()
+	assert workflow_id, f"Failed to get workflow ID. See {log_a.name}"
+
+	# Let the workflow start executing and executor-a register a few heartbeats.
+	await asyncio.sleep(2)
+	assert await _get_workflow_status(postgres_url, workflow_id) == "PENDING"
+
+	# Crash executor-a. No other executor exists, so once it goes unhealthy the reassignment
+	# loop has no healthy peer to drain to.
+	_kill(proc_a, log_a)
+
+	# Wait well past the grace period (1.5s) so the loop runs several no-healthy-peer cycles
+	# (interval 500ms). The workflow must remain PENDING and still owned by executor-a — the
+	# monitor must not drop or misassign it while no target is available.
+	await asyncio.sleep(6.0)
+	assert await _get_workflow_status(postgres_url, workflow_id) == "PENDING"
+	assert await _get_workflow_executor(postgres_url, workflow_id) == "executor-a"
+
+	# Now bring up a healthy same-type executor; the monitor should reassign on its next cycle.
+	proc_b, log_b = _start_executor(postgres_url, "executor-b", monitor_url, False, e2e_log_dir)
+
+	deadline = time.time() + 25
+	final_status = None
+	while time.time() < deadline:
+		final_status = await _get_workflow_status(postgres_url, workflow_id)
+		if final_status == "SUCCESS":
+			break
+		await asyncio.sleep(1.0)
+
+	_kill(proc_b, log_b)
+
+	assert final_status == "SUCCESS", f"Workflow did not complete. Status: {final_status}\nSee logs in {e2e_log_dir}"
+	assert await _get_workflow_executor(postgres_url, workflow_id) == "executor-b"
+
+
 async def test_multi_type_concurrent_crash_and_recovery(monitor_server, postgres_url, e2e_log_dir):
 	"""
 	Three executor types run concurrently, each exercising a distinct recovery path.
