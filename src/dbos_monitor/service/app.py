@@ -10,6 +10,8 @@ from dbos_monitor.service.models import ExecutorInfo, HeartbeatRequest, Heartbea
 from dbos_monitor.service.monitor_db import MonitorDB
 from dbos_monitor.service.scheduler import reassignment_loop
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -49,7 +51,14 @@ def _register_routes(app: FastAPI):
 	@app.post("/heartbeat", response_model=HeartbeatResponse)
 	async def heartbeat(req: HeartbeatRequest):
 		monitor_db: MonitorDB = app.state.monitor_db
-		await monitor_db.upsert_executor(req.executor_id, req.executor_type, req.health_ping_interval_ms)
+		is_new = await monitor_db.upsert_executor(req.executor_id, req.executor_type, req.health_ping_interval_ms)
+		if is_new:
+			logger.info(
+				"Discovered new executor %s (type=%s, ping_interval_ms=%d)",
+				req.executor_id,
+				req.executor_type,
+				req.health_ping_interval_ms,
+			)
 		recovery_needed = await monitor_db.check_and_clear_recovery_needed(req.executor_id)
 		return HeartbeatResponse(recovery_needed=recovery_needed)
 

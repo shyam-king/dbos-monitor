@@ -10,9 +10,12 @@ logger = logging.getLogger(__name__)
 
 
 async def reassignment_loop(config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB):
+	# Executor IDs already warned about, so a still-unhealthy executor (e.g. one with no
+	# healthy peer to take over yet) isn't re-logged every cycle.
+	warned_unhealthy: set[str] = set()
 	while True:
 		try:
-			await _run_reassignment_cycle(config, monitor_db, dbos_db)
+			await _run_reassignment_cycle(config, monitor_db, dbos_db, warned_unhealthy)
 		except asyncio.CancelledError:
 			raise
 		except Exception:
@@ -20,13 +23,28 @@ async def reassignment_loop(config: MonitorConfig, monitor_db: MonitorDB, dbos_d
 		await asyncio.sleep(config.reassignment_loop_interval_ms / 1000)
 
 
-async def _run_reassignment_cycle(config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB):
+async def _run_reassignment_cycle(
+	config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB, warned_unhealthy: set[str] | None = None
+):
+	if warned_unhealthy is None:
+		warned_unhealthy = set()
+
 	unhealthy = await monitor_db.get_unhealthy_executors(
 		grace_timeout_ms=config.executor_health_ping_grace_timeout_ms,
 		unknown_timeout_ms=config.unknown_executor_health_ping_timeout_ms,
 	)
+	# Forget executors that are healthy again so a fresh failure logs anew.
+	warned_unhealthy.intersection_update(e.executor_id for e in unhealthy)
 
 	for executor in unhealthy:
+		if executor.executor_id not in warned_unhealthy:
+			logger.warning(
+				"Executor %s (type=%s) is unhealthy (last heartbeat at %d); attempting reassignment",
+				executor.executor_id,
+				executor.executor_type,
+				executor.last_ping_at,
+			)
+			warned_unhealthy.add(executor.executor_id)
 		await _drain_executor(config, monitor_db, dbos_db, executor)
 
 

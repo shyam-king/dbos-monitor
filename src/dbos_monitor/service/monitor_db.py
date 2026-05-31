@@ -40,19 +40,24 @@ class MonitorDB:
 		if self._pool:
 			await self._pool.close()
 
-	async def upsert_executor(self, executor_id: str, executor_type: str, ping_interval_ms: int) -> None:
+	async def upsert_executor(self, executor_id: str, executor_type: str, ping_interval_ms: int) -> bool:
+		"""Record a heartbeat. Returns True if this executor was newly discovered (inserted)."""
 		now_ms = _now_ms()
 		async with self._pool.connection() as conn:
-			await conn.execute(
-				"""
+			row = await (
+				await conn.execute(
+					"""
                 INSERT INTO executors (executor_id, executor_type, health_ping_interval_ms, last_ping_at, first_seen_at)
                 VALUES (%(id)s, %(type)s, %(interval)s, %(now)s, %(now)s)
                 ON CONFLICT (executor_id) DO UPDATE SET
                     last_ping_at = %(now)s,
                     health_ping_interval_ms = %(interval)s
+                RETURNING (xmax = 0) AS inserted
                 """,
-				{"id": executor_id, "type": executor_type, "interval": ping_interval_ms, "now": now_ms},
-			)
+					{"id": executor_id, "type": executor_type, "interval": ping_interval_ms, "now": now_ms},
+				)
+			).fetchone()
+			return bool(row[0])
 
 	async def check_and_clear_recovery_needed(self, executor_id: str) -> bool:
 		async with self._pool.connection() as conn:
