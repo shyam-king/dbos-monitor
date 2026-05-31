@@ -2,6 +2,10 @@
 
 This project has just started and is in its early stages hence there is lack of documentation, contribution guidelines etc. Please get in touch with the author directly for help.
 
+# TLDR
+- Official Helm Chart is available [here](https://github.com/shyam-king/dbos-monitor-helm).
+- Docker image is available at [Docker Hub](https://hub.docker.com/r/shyamking/dbos-monitor).
+
 # About the project
 
 This project provides support to applications that use [DBOS-transact python library](https://github.com/dbos-inc/dbos-transact-py).
