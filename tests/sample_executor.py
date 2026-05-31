@@ -2,13 +2,16 @@
 Sample DBOS executor process for E2E testing.
 
 Usage:
-    python sample_executor.py <postgres_url> <executor_id> <monitor_url> [--type <type>] [--start-workflow]
+    python sample_executor.py <postgres_url> <executor_id> <monitor_url> \
+        [--type <type>] [--start-workflow] [--no-monitor]
 
 --type sets the executor type reported to the monitor (default "worker"); reassignment
 only happens between executors of the same type.
 When --start-workflow is passed, starts --num-workflows (default 1) sample workflows and
 prints each workflow ID to stdout, one per line.
 Otherwise, just launches DBOS (triggering recovery) and waits for workflows to complete.
+--no-monitor skips the heartbeat client entirely, so the monitor never tracks this executor
+(used to simulate workflows abandoned by an unknown executor).
 """
 
 import asyncio
@@ -27,6 +30,7 @@ async def run_executor(
 	start_workflow: bool,
 	executor_type: str = "worker",
 	num_workflows: int = 1,
+	monitor_enabled: bool = True,
 ):
 	# Logs go to stderr; stdout is reserved for the workflow-ID line the test reads.
 	logging.basicConfig(
@@ -77,16 +81,22 @@ async def run_executor(
 	DBOS.launch()
 	logger.info("DBOS launched for executor %s", executor_id)
 
-	from dbos_monitor_client import DBOSMonitorClient
+	# When the monitor is disabled this executor sends no heartbeats, so the monitor never
+	# tracks it — its workflows look abandoned, exercising the orphan-recovery path.
+	monitor_client = None
+	if monitor_enabled:
+		from dbos_monitor_client import DBOSMonitorClient
 
-	monitor_client = DBOSMonitorClient(
-		monitor_url=monitor_url,
-		executor_id=executor_id,
-		executor_type=executor_type,
-		health_ping_interval_ms=500,
-	)
-	monitor_client.start()
-	logger.info("Heartbeat client started, reporting to %s", monitor_url)
+		monitor_client = DBOSMonitorClient(
+			monitor_url=monitor_url,
+			executor_id=executor_id,
+			executor_type=executor_type,
+			health_ping_interval_ms=500,
+		)
+		monitor_client.start()
+		logger.info("Heartbeat client started, reporting to %s", monitor_url)
+	else:
+		logger.info("Monitor disabled; executor %s will not send heartbeats", executor_id)
 
 	if start_workflow:
 		for _ in range(num_workflows):
@@ -103,7 +113,8 @@ async def run_executor(
 		pass
 	finally:
 		logger.info("Shutting down executor %s", executor_id)
-		monitor_client.stop()
+		if monitor_client is not None:
+			monitor_client.stop()
 		DBOS.destroy()
 
 
@@ -114,4 +125,7 @@ if __name__ == "__main__":
 	start_wf = "--start-workflow" in sys.argv
 	executor_type = sys.argv[sys.argv.index("--type") + 1] if "--type" in sys.argv else "worker"
 	num_workflows = int(sys.argv[sys.argv.index("--num-workflows") + 1]) if "--num-workflows" in sys.argv else 1
-	asyncio.run(run_executor(postgres_url, executor_id, monitor_url, start_wf, executor_type, num_workflows))
+	monitor_enabled = "--no-monitor" not in sys.argv
+	asyncio.run(
+		run_executor(postgres_url, executor_id, monitor_url, start_wf, executor_type, num_workflows, monitor_enabled)
+	)

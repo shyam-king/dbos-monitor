@@ -9,7 +9,7 @@ from dbos_monitor.service.app import create_app
 from dbos_monitor.service.config import MonitorConfig
 from dbos_monitor.service.dbos_db import DbosDB
 from dbos_monitor.service.monitor_db import MonitorDB
-from dbos_monitor.service.scheduler import _run_reassignment_cycle
+from dbos_monitor.service.scheduler import _run_discovery_cycle, _run_orphan_cycle, _run_reassignment_cycle
 
 pytestmark = pytest.mark.integration
 
@@ -68,6 +68,19 @@ async def _get_workflow_executor(postgres_url: str, workflow_id: str) -> str | N
 			)
 		).fetchone()
 		return row[0] if row else None
+
+
+async def _insert_completed_workflow(postgres_url: str, workflow_id: str, executor_id: str, name: str):
+	now_ms = int(time.time() * 1000)
+	async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as conn:
+		await conn.execute(
+			"""
+            INSERT INTO dbos.workflow_status
+                (workflow_uuid, status, name, executor_id, created_at, updated_at)
+            VALUES (%(id)s, 'SUCCESS', %(name)s, %(exec)s, %(now)s, %(now)s)
+            """,
+			{"id": workflow_id, "name": name, "exec": executor_id, "now": now_ms},
+		)
 
 
 async def test_workflow_reassignment_on_executor_crash(running_app, postgres_url):
@@ -240,3 +253,77 @@ async def test_reassignment_drains_in_batches(running_app, postgres_url):
 	# The drained executor is removed from the monitor.
 	remaining = {e["executor_id"] for e in await monitor_db.get_all_executors(grace_timeout_ms=500)}
 	assert "executor-e" not in remaining
+
+
+# --- Experimental: workflow type discovery + orphan assignment ---
+
+
+async def _register(client, executor_id: str, executor_type: str, interval_ms: int = 5000):
+	resp = await client.post(
+		"/heartbeat",
+		json={"executor_id": executor_id, "executor_type": executor_type, "health_ping_interval_ms": interval_ms},
+	)
+	assert resp.status_code == 200
+	return resp
+
+
+async def test_discovery_records_type_from_completed_workflow(running_app, postgres_url):
+	"""A SUCCESS workflow owned by a healthy executor teaches the monitor name -> type."""
+	client, config, monitor_db, dbos_db = running_app
+	await _register(client, "worker-1", "worker")
+	await _insert_completed_workflow(postgres_url, "wf-done", "worker-1", "ingest")
+
+	await _run_discovery_cycle(config, monitor_db, dbos_db)
+
+	assert await monitor_db.get_types_for_workflows(["ingest"]) == {"ingest": ["worker"]}
+
+
+async def test_orphan_workflow_reassigned_by_inferred_type(running_app, postgres_url):
+	"""A PENDING workflow owned by an untracked executor is reassigned to a healthy executor
+	of the type inferred for its name, which then gets recovery_needed."""
+	client, config, monitor_db, dbos_db = running_app
+	config.orphan_age_threshold_ms = None  # the inserted workflow is brand new
+
+	# Teach the monitor that "ingest" runs on "worker".
+	await _register(client, "worker-1", "worker")
+	await _insert_completed_workflow(postgres_url, "wf-done", "worker-1", "ingest")
+	await _run_discovery_cycle(config, monitor_db, dbos_db)
+
+	# An untracked "ghost" executor left an "ingest" workflow PENDING.
+	await _insert_pending_workflow(postgres_url, "wf-orphan", "ghost")
+	async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as conn:
+		await conn.execute(
+			"UPDATE dbos.workflow_status SET name = 'ingest' WHERE workflow_uuid = 'wf-orphan'"
+		)
+
+	await _run_orphan_cycle(config, monitor_db, dbos_db)
+
+	assert await _get_workflow_executor(postgres_url, "wf-orphan") == "worker-1"
+
+	# worker-1 learns it needs to recover on its next heartbeat.
+	resp = await _register(client, "worker-1", "worker")
+	assert resp.json()["recovery_needed"] is True
+
+
+async def test_orphan_workflow_with_unknown_type_left_alone(running_app, postgres_url):
+	"""Without an inferred type, an orphan stays put."""
+	client, config, monitor_db, dbos_db = running_app
+	config.orphan_age_threshold_ms = None
+
+	await _register(client, "worker-1", "worker")
+	await _insert_pending_workflow(postgres_url, "wf-mystery", "ghost")  # name 'test_workflow', never learned
+
+	await _run_orphan_cycle(config, monitor_db, dbos_db)
+
+	assert await _get_workflow_executor(postgres_url, "wf-mystery") == "ghost"
+
+
+async def test_orphan_cycle_no_known_executors_is_safe(running_app, postgres_url):
+	"""Guard: with zero registered executors, a PENDING workflow is NOT treated as an orphan."""
+	client, config, monitor_db, dbos_db = running_app
+	config.orphan_age_threshold_ms = None
+	await _insert_pending_workflow(postgres_url, "wf-untouched", "ghost")
+
+	await _run_orphan_cycle(config, monitor_db, dbos_db)
+
+	assert await _get_workflow_executor(postgres_url, "wf-untouched") == "ghost"

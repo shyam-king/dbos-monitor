@@ -12,6 +12,13 @@ CREATE TABLE IF NOT EXISTS executors (
     first_seen_at BIGINT NOT NULL,
     recovery_needed BOOLEAN DEFAULT FALSE
 );
+
+CREATE TABLE IF NOT EXISTS workflow_type_inference (
+    workflow_name TEXT NOT NULL,
+    executor_type TEXT NOT NULL,
+    last_seen_at BIGINT NOT NULL,
+    PRIMARY KEY (workflow_name, executor_type)
+);
 """
 
 
@@ -141,6 +148,51 @@ class MonitorDB:
 				"DELETE FROM executors WHERE executor_id = %(id)s",
 				{"id": executor_id},
 			)
+
+	async def get_all_executor_ids(self) -> list[str]:
+		"""Every known executor_id (no health filter). Used to tell genuine orphans
+		(owned by an executor the monitor has never tracked) from tracked-but-unhealthy ones."""
+		async with self._pool.connection() as conn:
+			rows = await (await conn.execute("SELECT executor_id FROM executors")).fetchall()
+			return [r[0] for r in rows]
+
+	async def record_workflow_type(self, workflow_name: str, executor_type: str) -> bool:
+		"""Record that ``executor_type`` can run ``workflow_name``. Returns True if this is a
+		newly discovered mapping (so callers can log only first-time discoveries)."""
+		now_ms = _now_ms()
+		async with self._pool.connection() as conn:
+			row = await (
+				await conn.execute(
+					"""
+                INSERT INTO workflow_type_inference (workflow_name, executor_type, last_seen_at)
+                VALUES (%(name)s, %(type)s, %(now)s)
+                ON CONFLICT (workflow_name, executor_type) DO UPDATE SET last_seen_at = %(now)s
+                RETURNING (xmax = 0) AS inserted
+                """,
+					{"name": workflow_name, "type": executor_type, "now": now_ms},
+				)
+			).fetchone()
+			return bool(row[0])
+
+	async def get_types_for_workflows(self, workflow_names: list[str]) -> dict[str, list[str]]:
+		"""Map each given workflow name to the executor types known to run it."""
+		if not workflow_names:
+			return {}
+		async with self._pool.connection() as conn:
+			rows = await (
+				await conn.execute(
+					"""
+                    SELECT workflow_name, executor_type
+                    FROM workflow_type_inference
+                    WHERE workflow_name = ANY(%(names)s::text[])
+                    """,
+					{"names": workflow_names},
+				)
+			).fetchall()
+			result: dict[str, list[str]] = {}
+			for name, executor_type in rows:
+				result.setdefault(name, []).append(executor_type)
+			return result
 
 	async def get_all_executors(self, grace_timeout_ms: int) -> list[dict]:
 		now_ms = _now_ms()

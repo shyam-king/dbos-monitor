@@ -35,6 +35,30 @@ This project introduces 2 components to solve the issue. An HTTP service and a v
 - The monitor service keeps track of all healthy executors using the pings.
 - The monitor service also connects to the same postgres db that is used by the dbos runtime.
 
+### Recovery of Workflows from Untracked Executors (experimental)
+
+> Gated by `DBOS_MONITOR_ENABLE_EXPERIMENTAL_WKFLW_TYPE_DISCOVERY` and **off by default**.
+
+The reassignment described above only covers executors the monitor has personally observed
+(those that have sent at least one heartbeat). A workflow whose owning executor the monitor
+has *never* seen — e.g. an executor that crashed before its first heartbeat, or workflows that
+predate the monitor's deployment — has no recorded type, and reassignment is type-scoped, so it
+would otherwise stay `PENDING` forever (unless that exact `executor_id` relaunches and DBOS
+self-recovers it).
+
+When enabled, the monitor runs two extra background loops to close this gap:
+
+- **Type discovery** — observes `SUCCESS` workflows completed by healthy executors and learns a
+  `workflow_name → executor_type` mapping (a workflow may map to multiple types). The mapping is
+  persisted in the monitor's database so it survives executor churn.
+- **Orphan assignment** — finds long-abandoned `PENDING` workflows owned by an executor the
+  monitor does not recognise, infers a compatible type from the learned mapping, and reassigns
+  each to a healthy executor of that type (which then recovers it via the usual heartbeat signal).
+
+Orphans are only re-homed once they are older than `DBOS_MONITOR_ORPHAN_AGE_THRESHOLD_MS`
+(default 2 hours), so freshly-created work and executors the normal loop is mid-draining are left
+alone. This is experimental and best treated as a safety net rather than a primary recovery path.
+
 ## Architecture
 
 ```
@@ -129,6 +153,13 @@ client.start()
 | `DBOS_MONITOR_REASSIGNMENT_LOOP_INTERVAL_MS` | How often the reassignment loop runs | `3000` |
 | `DBOS_MONITOR_REASSIGNMENT_MAX_BATCH_SIZE` | Max workflows reassigned to a peer per batch | `20` |
 | `DBOS_MONITOR_LOG_LEVEL` | Logging level | `INFO` |
+| `DBOS_MONITOR_ENABLE_EXPERIMENTAL_WKFLW_TYPE_DISCOVERY` | Enable workflow-type discovery + untracked-orphan recovery (experimental) | `false` |
+| `DBOS_MONITOR_TYPE_DISCOVERY_LOOP_INTERVAL_MS` | How often the type-discovery loop runs *(experimental)* | `10000` |
+| `DBOS_MONITOR_TYPE_DISCOVERY_LOOKBACK_MS` | Only inspect workflows completed within this window *(experimental)* | `60000` |
+| `DBOS_MONITOR_TYPE_DISCOVERY_MAX_BATCH_SIZE` | Max completed workflows examined per discovery cycle *(experimental)* | `100` |
+| `DBOS_MONITOR_ORPHAN_ASSIGNMENT_LOOP_INTERVAL_MS` | How often the orphan-assignment loop runs *(experimental)* | `10000` |
+| `DBOS_MONITOR_ORPHAN_ASSIGNMENT_MAX_BATCH_SIZE` | Max orphaned workflows reassigned per cycle *(experimental)* | `20` |
+| `DBOS_MONITOR_ORPHAN_AGE_THRESHOLD_MS` | Only re-home orphans older than this (relative age, ms) *(experimental)* | `7200000` |
 
 ### Client SDK Parameters
 

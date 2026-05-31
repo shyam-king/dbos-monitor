@@ -8,7 +8,7 @@ from dbos_monitor.service.config import MonitorConfig
 from dbos_monitor.service.dbos_db import DbosDB
 from dbos_monitor.service.models import ExecutorInfo, HeartbeatRequest, HeartbeatResponse
 from dbos_monitor.service.monitor_db import MonitorDB
-from dbos_monitor.service.scheduler import reassignment_loop
+from dbos_monitor.service.scheduler import orphan_assignment_loop, reassignment_loop, type_discovery_loop
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +26,19 @@ async def lifespan(app: FastAPI):
 	app.state.monitor_db = monitor_db
 	app.state.dbos_db = dbos_db
 
-	task = asyncio.create_task(reassignment_loop(config, monitor_db, dbos_db))
+	tasks = [asyncio.create_task(reassignment_loop(config, monitor_db, dbos_db))]
+	if config.enable_experimental_wkflw_type_discovery:
+		logger.info("Experimental workflow-type discovery enabled; starting discovery + orphan-assignment loops")
+		tasks.append(asyncio.create_task(type_discovery_loop(config, monitor_db, dbos_db)))
+		tasks.append(asyncio.create_task(orphan_assignment_loop(config, monitor_db, dbos_db)))
 	yield
-	task.cancel()
-	try:
-		await task
-	except asyncio.CancelledError:
-		pass
+	for task in tasks:
+		task.cancel()
+	for task in tasks:
+		try:
+			await task
+		except asyncio.CancelledError:
+			pass
 	await monitor_db.close()
 	await dbos_db.close()
 

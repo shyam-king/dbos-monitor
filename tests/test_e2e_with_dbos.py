@@ -11,6 +11,7 @@ Requires: Docker (for testcontainers) or TEST_POSTGRES_URL env var.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -61,11 +62,29 @@ def monitor_config(postgres_url):
 
 
 @pytest.fixture
-async def monitor_server(monitor_config, postgres_url, e2e_log_dir):
+def experimental_monitor_config(postgres_url):
+	"""Like monitor_config but with the experimental type-discovery feature on, fast loop
+	intervals, and a zero orphan age threshold so orphans are eligible immediately."""
+	return MonitorConfig(
+		executor_health_ping_grace_timeout_ms=1000,
+		unknown_executor_health_ping_timeout_ms=3000,
+		dbos_postgres_connection_uri=postgres_url,
+		monitor_postgres_connection_uri=postgres_url,
+		reassignment_loop_interval_ms=500,
+		enable_experimental_wkflw_type_discovery=True,
+		type_discovery_loop_interval_ms=500,
+		orphan_assignment_loop_interval_ms=500,
+		orphan_age_threshold_ms=0,
+	)
+
+
+@contextlib.asynccontextmanager
+async def _serve_monitor(config, postgres_url, e2e_log_dir):
 	# Clean slate: drop everything so DBOS can run its own migrations
 	async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as conn:
 		await conn.execute("DROP SCHEMA IF EXISTS dbos CASCADE")
 		await conn.execute("DROP TABLE IF EXISTS executors")
+		await conn.execute("DROP TABLE IF EXISTS workflow_type_inference")
 
 	# Capture the in-process monitor/dbos logs into the run's log directory.
 	root_logger = logging.getLogger()
@@ -75,9 +94,9 @@ async def monitor_server(monitor_config, postgres_url, e2e_log_dir):
 	root_logger.addHandler(handler)
 	root_logger.setLevel(logging.INFO)
 
-	app = create_app(monitor_config)
-	config = uvicorn.Config(app, host="127.0.0.1", port=MONITOR_PORT, log_level="warning")
-	server = uvicorn.Server(config)
+	app = create_app(config)
+	uconfig = uvicorn.Config(app, host="127.0.0.1", port=MONITOR_PORT, log_level="warning")
+	server = uvicorn.Server(uconfig)
 	thread = threading.Thread(target=server.run, daemon=True)
 	thread.start()
 
@@ -86,14 +105,26 @@ async def monitor_server(monitor_config, postgres_url, e2e_log_dir):
 			break
 		await asyncio.sleep(0.1)
 
-	yield f"http://127.0.0.1:{MONITOR_PORT}"
+	try:
+		yield f"http://127.0.0.1:{MONITOR_PORT}"
+	finally:
+		server.should_exit = True
+		thread.join(timeout=5)
+		root_logger.removeHandler(handler)
+		root_logger.setLevel(prev_level)
+		handler.close()
 
-	server.should_exit = True
-	thread.join(timeout=5)
 
-	root_logger.removeHandler(handler)
-	root_logger.setLevel(prev_level)
-	handler.close()
+@pytest.fixture
+async def monitor_server(monitor_config, postgres_url, e2e_log_dir):
+	async with _serve_monitor(monitor_config, postgres_url, e2e_log_dir) as url:
+		yield url
+
+
+@pytest.fixture
+async def experimental_monitor_server(experimental_monitor_config, postgres_url, e2e_log_dir):
+	async with _serve_monitor(experimental_monitor_config, postgres_url, e2e_log_dir) as url:
+		yield url
 
 
 def _start_executor(
@@ -104,11 +135,15 @@ def _start_executor(
 	log_dir: str,
 	executor_type: str = "worker",
 	num_workflows: int = 1,
+	untracked: bool = False,
 ):
 	args = [sys.executable, SAMPLE_EXECUTOR, postgres_url, executor_id, monitor_url, "--type", executor_type]
 	args += ["--num-workflows", str(num_workflows)]
 	if start_workflow:
 		args.append("--start-workflow")
+	if untracked:
+		# No heartbeats -> the monitor never tracks this executor; its workflows look abandoned.
+		args.append("--no-monitor")
 	# Executor logs go to stderr -> a per-executor file; stdout (PIPE) carries the workflow ID.
 	# A restarted executor reuses its ID, so append rather than truncate its log.
 	log_file = open(os.path.join(log_dir, f"{executor_id}.log"), "a")
@@ -127,6 +162,17 @@ def _kill(proc, log_file):
 	if proc.stdout:
 		proc.stdout.close()
 	log_file.close()
+
+
+async def _wait_for_status(postgres_url: str, workflow_id: str, status: str, timeout: float) -> str | None:
+	deadline = time.time() + timeout
+	current = None
+	while time.time() < deadline:
+		current = await _get_workflow_status(postgres_url, workflow_id)
+		if current == status:
+			return current
+		await asyncio.sleep(1.0)
+	return current
 
 
 async def _await_all_success(postgres_url: str, workflow_ids: list[str], timeout: float) -> dict[str, str | None]:
@@ -413,3 +459,103 @@ async def test_many_workflows_recovered_in_batches(monitor_config, monitor_serve
 	)
 	for wf in workflow_ids:
 		assert await _get_workflow_executor(postgres_url, wf) == "executor-b"
+
+
+async def test_untracked_orphan_recovery(experimental_monitor_server, postgres_url, e2e_log_dir):
+	"""Experimental: type learned BEFORE abandonment.
+
+	A healthy tracked worker completes a workflow (so the monitor learns multi_step_workflow ->
+	worker). An untracked 'ghost' executor then starts the same workflow and crashes, leaving it
+	abandoned. The monitor infers the type, reassigns the orphan to the live worker, and the
+	worker recovers it.
+	"""
+	monitor_url = experimental_monitor_server
+
+	# Healthy tracked worker: run one workflow to completion so its type is discovered.
+	proc_w, log_w = _start_executor(postgres_url, "worker-1", monitor_url, True, e2e_log_dir)
+	wf_worker = proc_w.stdout.readline().strip()
+	assert wf_worker, f"Failed to get worker workflow ID. See {log_w.name}"
+	assert await _wait_for_status(postgres_url, wf_worker, "SUCCESS", timeout=30) == "SUCCESS"
+
+	# Untracked ghost: starts the same workflow, never heartbeats, then crashes.
+	proc_g, log_g = _start_executor(postgres_url, "ghost", monitor_url, True, e2e_log_dir, untracked=True)
+	wf_orphan = proc_g.stdout.readline().strip()
+	assert wf_orphan and wf_orphan != wf_worker, f"Failed to get orphan workflow ID. See {log_g.name}"
+	await asyncio.sleep(2)
+	assert await _get_workflow_status(postgres_url, wf_orphan) == "PENDING"
+	_kill(proc_g, log_g)
+
+	# The monitor should infer the type, reassign to worker-1, and worker-1 recovers it.
+	final_status = await _wait_for_status(postgres_url, wf_orphan, "SUCCESS", timeout=30)
+
+	_kill(proc_w, log_w)
+
+	assert final_status == "SUCCESS", f"Orphan not recovered. Status: {final_status}\nSee logs in {e2e_log_dir}"
+	assert await _get_workflow_executor(postgres_url, wf_orphan) == "worker-1"
+
+
+async def test_untracked_orphan_recovery_type_learned_after_abandonment(
+	experimental_monitor_server, postgres_url, e2e_log_dir
+):
+	"""Experimental: type learned AFTER abandonment.
+
+	The orphan exists first, with no type mapping yet, so the monitor leaves it alone even though
+	a healthy worker is available. Only once that worker completes a workflow (teaching the
+	monitor the type) does the previously-stuck orphan get reassigned and recovered. Proves the
+	two loops compose regardless of ordering.
+	"""
+	monitor_url = experimental_monitor_server
+
+	# Healthy tracked worker, busy running its own (long) workflow -> not yet completed, so its
+	# type is not discovered yet.
+	proc_w, log_w = _start_executor(postgres_url, "worker-1", monitor_url, True, e2e_log_dir)
+	wf_worker = proc_w.stdout.readline().strip()
+	assert wf_worker, f"Failed to get worker workflow ID. See {log_w.name}"
+
+	# Untracked ghost abandons a workflow before any type is known.
+	proc_g, log_g = _start_executor(postgres_url, "ghost", monitor_url, True, e2e_log_dir, untracked=True)
+	wf_orphan = proc_g.stdout.readline().strip()
+	assert wf_orphan and wf_orphan != wf_worker, f"Failed to get orphan workflow ID. See {log_g.name}"
+	await asyncio.sleep(2)
+	assert await _get_workflow_status(postgres_url, wf_orphan) == "PENDING"
+	_kill(proc_g, log_g)
+
+	# No type learned yet -> the orphan loop runs but leaves the workflow with ghost.
+	await asyncio.sleep(3)
+	assert await _get_workflow_executor(postgres_url, wf_orphan) == "ghost"
+	assert await _get_workflow_status(postgres_url, wf_orphan) == "PENDING"
+
+	# Once the worker finishes its own workflow, the type is discovered and the orphan is placed.
+	assert await _wait_for_status(postgres_url, wf_worker, "SUCCESS", timeout=30) == "SUCCESS"
+	final_status = await _wait_for_status(postgres_url, wf_orphan, "SUCCESS", timeout=30)
+
+	_kill(proc_w, log_w)
+
+	assert final_status == "SUCCESS", f"Orphan not recovered. Status: {final_status}\nSee logs in {e2e_log_dir}"
+	assert await _get_workflow_executor(postgres_url, wf_orphan) == "worker-1"
+
+
+async def test_untracked_orphan_not_recovered_when_flag_off(monitor_server, postgres_url, e2e_log_dir):
+	"""Control: with the experimental flag OFF (default monitor_server), an abandoned workflow
+	from an untracked executor is never re-homed, even with a healthy same-type worker available."""
+	monitor_url = monitor_server
+
+	proc_w, log_w = _start_executor(postgres_url, "worker-1", monitor_url, True, e2e_log_dir)
+	wf_worker = proc_w.stdout.readline().strip()
+	assert wf_worker, f"Failed to get worker workflow ID. See {log_w.name}"
+	assert await _wait_for_status(postgres_url, wf_worker, "SUCCESS", timeout=30) == "SUCCESS"
+
+	proc_g, log_g = _start_executor(postgres_url, "ghost", monitor_url, True, e2e_log_dir, untracked=True)
+	wf_orphan = proc_g.stdout.readline().strip()
+	assert wf_orphan, f"Failed to get orphan workflow ID. See {log_g.name}"
+	await asyncio.sleep(2)
+	assert await _get_workflow_status(postgres_url, wf_orphan) == "PENDING"
+	_kill(proc_g, log_g)
+
+	# Give the monitor ample time; with the feature off nothing should touch the orphan.
+	await asyncio.sleep(8)
+
+	_kill(proc_w, log_w)
+
+	assert await _get_workflow_status(postgres_url, wf_orphan) == "PENDING"
+	assert await _get_workflow_executor(postgres_url, wf_orphan) == "ghost"
