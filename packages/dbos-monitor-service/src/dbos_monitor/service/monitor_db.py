@@ -13,11 +13,10 @@ CREATE TABLE IF NOT EXISTS executors (
     recovery_needed BOOLEAN DEFAULT FALSE
 );
 
-CREATE TABLE IF NOT EXISTS workflow_type_inference (
-    workflow_name TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS workflow_type_mapping (
+    workflow_name TEXT PRIMARY KEY,
     executor_type TEXT NOT NULL,
-    last_seen_at BIGINT NOT NULL,
-    PRIMARY KEY (workflow_name, executor_type)
+    updated_at BIGINT NOT NULL
 );
 """
 
@@ -156,26 +155,28 @@ class MonitorDB:
 			rows = await (await conn.execute("SELECT executor_id FROM executors")).fetchall()
 			return [r[0] for r in rows]
 
-	async def record_workflow_type(self, workflow_name: str, executor_type: str) -> bool:
-		"""Record that ``executor_type`` can run ``workflow_name``. Returns True if this is a
-		newly discovered mapping (so callers can log only first-time discoveries)."""
+	async def upsert_workflow_mappings(self, mapping: dict[str, str]) -> None:
+		"""Persist explicit ``workflow_name -> executor_type`` entries pushed by an executor.
+		Newest mapping wins: an existing workflow's type is overwritten."""
+		if not mapping:
+			return
 		now_ms = _now_ms()
+		names = list(mapping)
+		types = [mapping[n] for n in names]
 		async with self._pool.connection() as conn:
-			row = await (
-				await conn.execute(
-					"""
-                INSERT INTO workflow_type_inference (workflow_name, executor_type, last_seen_at)
-                VALUES (%(name)s, %(type)s, %(now)s)
-                ON CONFLICT (workflow_name, executor_type) DO UPDATE SET last_seen_at = %(now)s
-                RETURNING (xmax = 0) AS inserted
+			await conn.execute(
+				"""
+                INSERT INTO workflow_type_mapping (workflow_name, executor_type, updated_at)
+                SELECT * FROM UNNEST(%(names)s::text[], %(types)s::text[], %(nows)s::bigint[])
+                ON CONFLICT (workflow_name) DO UPDATE SET
+                    executor_type = EXCLUDED.executor_type,
+                    updated_at = EXCLUDED.updated_at
                 """,
-					{"name": workflow_name, "type": executor_type, "now": now_ms},
-				)
-			).fetchone()
-			return bool(row[0])
+				{"names": names, "types": types, "nows": [now_ms] * len(names)},
+			)
 
-	async def get_types_for_workflows(self, workflow_names: list[str]) -> dict[str, list[str]]:
-		"""Map each given workflow name to the executor types known to run it."""
+	async def get_types_for_workflows(self, workflow_names: list[str]) -> dict[str, str]:
+		"""Map each given workflow name to the executor type declared to run it."""
 		if not workflow_names:
 			return {}
 		async with self._pool.connection() as conn:
@@ -183,16 +184,13 @@ class MonitorDB:
 				await conn.execute(
 					"""
                     SELECT workflow_name, executor_type
-                    FROM workflow_type_inference
+                    FROM workflow_type_mapping
                     WHERE workflow_name = ANY(%(names)s::text[])
                     """,
 					{"names": workflow_names},
 				)
 			).fetchall()
-			result: dict[str, list[str]] = {}
-			for name, executor_type in rows:
-				result.setdefault(name, []).append(executor_type)
-			return result
+			return {name: executor_type for name, executor_type in rows}
 
 	async def get_all_executors(self, grace_timeout_ms: int) -> list[dict]:
 		now_ms = _now_ms()

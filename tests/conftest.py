@@ -84,4 +84,4 @@ async def clean_tables(postgres_url, _init_schema):
 	async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as conn:
 		await conn.execute("DELETE FROM dbos.workflow_status")
 		await conn.execute("DROP TABLE IF EXISTS executors")
-		await conn.execute("DROP TABLE IF EXISTS workflow_type_inference")
+		await conn.execute("DROP TABLE IF EXISTS workflow_type_mapping")

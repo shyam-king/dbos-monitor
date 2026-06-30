@@ -97,42 +97,11 @@ def _select_target(healthy_executors):
 	return random.choice(healthy_executors)
 
 
-async def type_discovery_loop(config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB):
-	"""Experimental: learn which executor types can run which workflows by observing the
-	workflows that healthy executors complete, persisting the name -> type mapping."""
-	while True:
-		try:
-			await _run_discovery_cycle(config, monitor_db, dbos_db)
-		except asyncio.CancelledError:
-			raise
-		except Exception:
-			logger.exception("Error in type discovery loop")
-		await asyncio.sleep(config.type_discovery_loop_interval_ms / 1000)
-
-
-async def _run_discovery_cycle(config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB):
-	healthy = await monitor_db.get_all_executors(grace_timeout_ms=config.executor_health_ping_grace_timeout_ms)
-	type_by_id = {e["executor_id"]: e["executor_type"] for e in healthy if e["healthy"]}
-	if not type_by_id:
-		return
-
-	completed = await dbos_db.get_completed_workflows_by_executors(
-		list(type_by_id),
-		lookback_ms=config.type_discovery_lookback_ms,
-		limit=config.type_discovery_max_batch_size,
-	)
-	for name, executor_id in completed:
-		executor_type = type_by_id.get(executor_id)
-		if executor_type and await monitor_db.record_workflow_type(name, executor_type):
-			logger.info("Discovered workflow type mapping: %s -> %s", name, executor_type)
-	logger.debug("Type discovery cycle examined %d completed workflows", len(completed))
-
-
 async def orphan_assignment_loop(config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB):
-	"""Experimental: re-home workflows abandoned by executors the monitor never tracked, using
-	the type mapping learned by the discovery loop to find a compatible healthy executor."""
+	"""Re-home workflows abandoned by executors the monitor never tracked, using the explicit
+	``workflow_name -> executor_type`` mapping (pushed by executors) to find a healthy peer."""
 	# Workflows already warned about as unplaceable, so we don't re-log every cycle while they
-	# wait for a compatible executor (or for their type to be discovered).
+	# wait for a compatible executor (or for their mapping to be declared).
 	warned_unplaceable: set[str] = set()
 	while True:
 		try:
@@ -173,12 +142,12 @@ async def _run_orphan_cycle(
 		if e["healthy"]:
 			healthy_by_type.setdefault(e["executor_type"], []).append(e["executor_id"])
 
-	# Group each placeable orphan under a randomly chosen compatible healthy executor.
+	# Group each placeable orphan under a randomly chosen healthy executor of its mapped type.
 	assignments: dict[str, list[str]] = {}
-	inferred_for_target: dict[str, set[str]] = {}
+	type_for_target: dict[str, str] = {}
 	for orphan in orphans:
-		candidate_types = [t for t in types_by_name.get(orphan["name"], []) if t in healthy_by_type]
-		candidates = [eid for t in candidate_types for eid in healthy_by_type[t]]
+		executor_type = types_by_name.get(orphan["name"])
+		candidates = healthy_by_type.get(executor_type, []) if executor_type else []
 		if not candidates:
 			if orphan["workflow_uuid"] not in warned_unplaceable:
 				logger.warning(
@@ -192,16 +161,16 @@ async def _run_orphan_cycle(
 			continue
 		target = random.choice(candidates)
 		assignments.setdefault(target, []).append(orphan["workflow_uuid"])
-		inferred_for_target.setdefault(target, set()).update(candidate_types)
+		type_for_target[target] = executor_type
 
 	for target, uuids in assignments.items():
 		reassigned = await dbos_db.reassign_workflow_ids(uuids, target)
 		if reassigned:
 			logger.info(
-				"Reassigned %d abandoned workflow(s) to %s (inferred type(s)=%s): %s",
+				"Reassigned %d abandoned workflow(s) to %s (type=%s): %s",
 				len(reassigned),
 				target,
-				", ".join(sorted(inferred_for_target[target])),
+				type_for_target[target],
 				", ".join(reassigned),
 			)
 			await monitor_db.mark_recovery_needed(target)

@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock
 from dbos_monitor.service.config import MonitorConfig
 from dbos_monitor.service.monitor_db import ExecutorRecord
 from dbos_monitor.service.scheduler import (
-	_run_discovery_cycle,
 	_run_orphan_cycle,
 	_run_reassignment_cycle,
 	_select_target,
@@ -146,75 +145,12 @@ def test_config_from_env(monkeypatch):
 	monkeypatch.setenv("DBOS_MONITOR_MONITOR_POSTGRES_CONNECTION_URI", "postgresql://monitor")
 	monkeypatch.setenv("DBOS_MONITOR_EXECUTOR_HEALTH_PING_GRACE_TIMEOUT_MS", "10000")
 	monkeypatch.setenv("DBOS_MONITOR_LOG_LEVEL", "DEBUG")
-	monkeypatch.setenv("DBOS_MONITOR_ENABLE_EXPERIMENTAL_WKFLW_TYPE_DISCOVERY", "true")
 
 	config = MonitorConfig()
 	assert config.dbos_postgres_connection_uri == "postgresql://dbos"
 	assert config.monitor_postgres_connection_uri == "postgresql://monitor"
 	assert config.executor_health_ping_grace_timeout_ms == 10000
 	assert config.log_level == "DEBUG"
-	assert config.enable_experimental_wkflw_type_discovery is True
-
-
-def test_experimental_flag_defaults_off():
-	assert _config().enable_experimental_wkflw_type_discovery is False
-
-
-# --- Type discovery cycle ---
-
-
-async def test_discovery_cycle_records_mappings():
-	monitor_db = AsyncMock()
-	monitor_db.get_all_executors.return_value = [
-		_executor("worker-1", "worker"),
-		_executor("api-1", "api"),
-	]
-	monitor_db.record_workflow_type.return_value = True
-
-	dbos_db = AsyncMock()
-	dbos_db.get_completed_workflows_by_executors.return_value = [
-		("ingest", "worker-1"),
-		("serve", "api-1"),
-	]
-
-	await _run_discovery_cycle(_config(), monitor_db, dbos_db)
-
-	monitor_db.record_workflow_type.assert_any_call("ingest", "worker")
-	monitor_db.record_workflow_type.assert_any_call("serve", "api")
-	assert monitor_db.record_workflow_type.call_count == 2
-
-
-async def test_discovery_cycle_maps_same_workflow_to_multiple_types():
-	"""A workflow run by two different healthy types yields two mappings."""
-	monitor_db = AsyncMock()
-	monitor_db.get_all_executors.return_value = [
-		_executor("worker-1", "worker"),
-		_executor("batch-1", "batch"),
-	]
-	monitor_db.record_workflow_type.return_value = True
-
-	dbos_db = AsyncMock()
-	dbos_db.get_completed_workflows_by_executors.return_value = [
-		("shared_wf", "worker-1"),
-		("shared_wf", "batch-1"),
-	]
-
-	await _run_discovery_cycle(_config(), monitor_db, dbos_db)
-
-	monitor_db.record_workflow_type.assert_any_call("shared_wf", "worker")
-	monitor_db.record_workflow_type.assert_any_call("shared_wf", "batch")
-
-
-async def test_discovery_cycle_skips_when_no_healthy_executors():
-	monitor_db = AsyncMock()
-	monitor_db.get_all_executors.return_value = [_executor("worker-1", "worker", healthy=False)]
-
-	dbos_db = AsyncMock()
-
-	await _run_discovery_cycle(_config(), monitor_db, dbos_db)
-
-	dbos_db.get_completed_workflows_by_executors.assert_not_called()
-	monitor_db.record_workflow_type.assert_not_called()
 
 
 # --- Orphan assignment cycle ---
@@ -235,7 +171,7 @@ async def test_orphan_cycle_skips_when_no_known_executors():
 async def test_orphan_cycle_reassigns_to_compatible_target():
 	monitor_db = AsyncMock()
 	monitor_db.get_all_executor_ids.return_value = ["worker-1"]
-	monitor_db.get_types_for_workflows.return_value = {"ingest": ["worker"]}
+	monitor_db.get_types_for_workflows.return_value = {"ingest": "worker"}
 	monitor_db.get_all_executors.return_value = [_executor("worker-1", "worker")]
 
 	dbos_db = AsyncMock()
@@ -250,18 +186,19 @@ async def test_orphan_cycle_reassigns_to_compatible_target():
 	monitor_db.mark_recovery_needed.assert_called_once_with("worker-1")
 
 
-async def test_orphan_cycle_picks_one_of_several_compatible_types():
+async def test_orphan_cycle_picks_one_of_several_healthy_peers():
+	"""Several healthy executors of the mapped type -> the orphan goes to one of them."""
 	monitor_db = AsyncMock()
-	monitor_db.get_all_executor_ids.return_value = ["worker-1", "batch-1"]
-	monitor_db.get_types_for_workflows.return_value = {"shared_wf": ["worker", "batch"]}
+	monitor_db.get_all_executor_ids.return_value = ["worker-1", "worker-2"]
+	monitor_db.get_types_for_workflows.return_value = {"ingest": "worker"}
 	monitor_db.get_all_executors.return_value = [
 		_executor("worker-1", "worker"),
-		_executor("batch-1", "batch"),
+		_executor("worker-2", "worker"),
 	]
 
 	dbos_db = AsyncMock()
 	dbos_db.get_pending_workflows_not_owned_by.return_value = [
-		{"workflow_uuid": "wf-1", "name": "shared_wf", "executor_id": "ghost"},
+		{"workflow_uuid": "wf-1", "name": "ingest", "executor_id": "ghost"},
 	]
 	dbos_db.reassign_workflow_ids.return_value = ["wf-1"]
 
@@ -269,7 +206,7 @@ async def test_orphan_cycle_picks_one_of_several_compatible_types():
 
 	(uuids, target), _ = dbos_db.reassign_workflow_ids.call_args
 	assert uuids == ["wf-1"]
-	assert target in {"worker-1", "batch-1"}
+	assert target in {"worker-1", "worker-2"}
 	monitor_db.mark_recovery_needed.assert_called_once_with(target)
 
 

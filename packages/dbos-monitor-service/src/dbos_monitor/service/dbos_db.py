@@ -90,34 +90,6 @@ class DbosDB:
 			).fetchall()
 			return [r[0] for r in rows]
 
-	async def get_completed_workflows_by_executors(
-		self, executor_ids: list[str], lookback_ms: int, limit: int
-	) -> list[tuple[str, str]]:
-		"""Recently SUCCEEDED workflows owned by the given executors, as (name, executor_id).
-
-		Bounded by a rolling lookback window and a row limit so the (unbounded) SUCCESS history
-		is never fully scanned — the discovery loop only needs newly-completed workflows.
-		"""
-		if not executor_ids:
-			return []
-		since = int(time.time() * 1000) - lookback_ms
-		async with self._pool.connection() as conn:
-			rows = await (
-				await conn.execute(
-					"""
-                    SELECT name, executor_id
-                    FROM dbos.workflow_status
-                    WHERE status = 'SUCCESS'
-                      AND executor_id = ANY(%(ids)s::text[])
-                      AND updated_at >= %(since)s
-                      AND name IS NOT NULL
-                    LIMIT %(limit)s
-                    """,
-					{"ids": executor_ids, "since": since, "limit": limit},
-				)
-			).fetchall()
-			return [(r[0], r[1]) for r in rows]
-
 	async def get_pending_workflows_not_owned_by(
 		self, known_executor_ids: list[str], age_threshold_ms: int | None, limit: int
 	) -> list[dict]:

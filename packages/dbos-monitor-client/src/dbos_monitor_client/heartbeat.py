@@ -4,6 +4,8 @@ import time
 
 import httpx
 
+from .registry import get_workflow_mappings
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +71,7 @@ class DBOSMonitorClient:
 					"executor_id": self._executor_id,
 					"executor_type": self._executor_type,
 					"health_ping_interval_ms": self._ping_interval_ms,
+					"workflow_mappings": get_workflow_mappings(),
 				},
 				timeout=5.0,
 			)

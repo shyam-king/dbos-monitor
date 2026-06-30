@@ -5,6 +5,7 @@ class HeartbeatRequest(BaseModel):
 	executor_id: str
 	executor_type: str
 	health_ping_interval_ms: int
+	workflow_mappings: dict[str, str] = {}
 
 
 class HeartbeatResponse(BaseModel):

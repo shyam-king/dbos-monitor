@@ -52,7 +52,13 @@ async def run_executor(
 
 	DBOS(config=config)
 
-	@DBOS.workflow()
+	from dbos_monitor_client import register_workflow_type
+
+	# Declare which executor type runs this workflow; the heartbeat client pushes the mapping
+	# to the monitor, which uses it to re-home the workflow if an untracked executor abandons it.
+	# The decorator name must match the DBOS workflow name, so pin both explicitly.
+	@register_workflow_type(executor_type, "multi_step_workflow")
+	@DBOS.workflow(name="multi_step_workflow")
 	async def multi_step_workflow():
 		logger.info("workflow started workflow_id=%s", DBOS.workflow_id)
 		r1 = await step_one()
