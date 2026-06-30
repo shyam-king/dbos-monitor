@@ -1,6 +1,6 @@
 [project]
 name = "dbos-monitor-service"
-version = "0.0.3"
+version = "0.0.5"
 description = "Executor health monitoring and workflow re-assignment service for DBOS-transact"
 requires-python = ">=3.11"
 dependencies = [

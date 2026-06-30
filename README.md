@@ -122,14 +122,14 @@ dependencies. It lives in this repo under `packages/dbos-monitor-client`.
 It is not published to PyPI yet, so install it directly from a tagged GitHub revision,
 pointing at the package subdirectory. Browse the available versions at
 [github.com/shyam-king/dbos-monitor/tags](https://github.com/shyam-king/dbos-monitor/tags),
-then pin the tag you want (e.g. `v0.0.3`):
+4hen pin the tag you want (e.g. `v0.0.5`):
 
 ```bash
 # uv
-uv add "dbos-monitor-client[dbos] @ git+https://github.com/shyam-king/dbos-monitor@v0.0.3#subdirectory=packages/dbos-monitor-client"
+uv add "dbos-monitor-client[dbos] @ git+https://github.com/shyam-king/dbos-monitor@v0.0.5#subdirectory=packages/dbos-monitor-client"
 
 # pip
-pip install "dbos-monitor-client[dbos] @ git+https://github.com/shyam-king/dbos-monitor@v0.0.3#subdirectory=packages/dbos-monitor-client"
+pip install "dbos-monitor-client[dbos] @ git+https://github.com/shyam-king/dbos-monitor@v0.0.5#subdirectory=packages/dbos-monitor-client"
 ```
 
 The `[dbos]` extra installs the `dbos` package, needed only for the default recovery handler

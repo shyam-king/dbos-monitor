@@ -1,6 +1,6 @@
 [project]
 name = "dbos-monitor-client"
-version = "0.0.3"
+version = "0.0.5"
 description = "Thin client SDK for the dbos-monitor service: heartbeats and DBOS recovery triggering"
 requires-python = ">=3.11"
 dependencies = [
