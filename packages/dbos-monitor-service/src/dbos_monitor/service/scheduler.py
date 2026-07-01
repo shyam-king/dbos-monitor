@@ -56,6 +56,10 @@ async def _drain_executor(config: MonitorConfig, monitor_db: MonitorDB, dbos_db:
 	A batch smaller than the cap means nothing more is pending, so the executor is removed.
 	"""
 	batch_size = config.reassignment_max_batch_size
+	# Workflows assigned to each target so far this cycle. A target's reported
+	# active_workflow_count only refreshes on its next heartbeat, so we project the load
+	# we've already added to avoid piling every batch onto the same peer.
+	projected: dict[str, int] = {}
 	while True:
 		healthy_targets = await monitor_db.get_healthy_executors_by_type(
 			executor.executor_type,
@@ -70,7 +74,10 @@ async def _drain_executor(config: MonitorConfig, monitor_db: MonitorDB, dbos_db:
 			)
 			return
 
-		target = _select_target(healthy_targets)
+		target = _pick_least_loaded(
+			healthy_targets,
+			lambda t: t.active_workflow_count + projected.get(t.executor_id, 0),
+		)
 		reassigned = await dbos_db.reassign_workflows(
 			old_executor_id=executor.executor_id,
 			new_executor_id=target.executor_id,
@@ -87,14 +94,17 @@ async def _drain_executor(config: MonitorConfig, monitor_db: MonitorDB, dbos_db:
 				", ".join(reassigned),
 			)
 			await monitor_db.mark_recovery_needed(target.executor_id)
+			projected[target.executor_id] = projected.get(target.executor_id, 0) + len(reassigned)
 
 		if len(reassigned) < batch_size:
 			await monitor_db.remove_executor(executor.executor_id)
 			return
 
 
-def _select_target(healthy_executors):
-	return random.choice(healthy_executors)
+def _pick_least_loaded(candidates, load_of):
+	"""Lowest projected load wins; ties broken randomly to avoid a deterministic hot peer."""
+	min_load = min(load_of(c) for c in candidates)
+	return random.choice([c for c in candidates if load_of(c) == min_load])
 
 
 async def orphan_assignment_loop(config: MonitorConfig, monitor_db: MonitorDB, dbos_db: DbosDB):
@@ -138,11 +148,14 @@ async def _run_orphan_cycle(
 	types_by_name = await monitor_db.get_types_for_workflows(list({o["name"] for o in orphans}))
 	healthy = await monitor_db.get_all_executors(grace_timeout_ms=config.executor_health_ping_grace_timeout_ms)
 	healthy_by_type: dict[str, list[str]] = {}
+	load_by_id: dict[str, int] = {}
 	for e in healthy:
 		if e["healthy"]:
 			healthy_by_type.setdefault(e["executor_type"], []).append(e["executor_id"])
+			load_by_id[e["executor_id"]] = e["active_workflow_count"]
 
-	# Group each placeable orphan under a randomly chosen healthy executor of its mapped type.
+	# Group each placeable orphan under the least-loaded healthy executor of its mapped type,
+	# counting workflows already grouped this cycle so we don't pile them all on one peer.
 	assignments: dict[str, list[str]] = {}
 	type_for_target: dict[str, str] = {}
 	for orphan in orphans:
@@ -159,7 +172,7 @@ async def _run_orphan_cycle(
 				)
 				warned_unplaceable.add(orphan["workflow_uuid"])
 			continue
-		target = random.choice(candidates)
+		target = _pick_least_loaded(candidates, lambda eid: load_by_id[eid] + len(assignments.get(eid, [])))
 		assignments.setdefault(target, []).append(orphan["workflow_uuid"])
 		type_for_target[target] = executor_type
 

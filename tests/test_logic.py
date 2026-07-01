@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock
 from dbos_monitor.service.config import MonitorConfig
 from dbos_monitor.service.monitor_db import ExecutorRecord
 from dbos_monitor.service.scheduler import (
+	_pick_least_loaded,
 	_run_orphan_cycle,
 	_run_reassignment_cycle,
-	_select_target,
 )
 
 
@@ -22,17 +22,30 @@ def _config(**overrides):
 	return MonitorConfig(**base)
 
 
-def _executor(executor_id, executor_type, healthy=True):
-	return {"executor_id": executor_id, "executor_type": executor_type, "healthy": healthy}
+def _executor(executor_id, executor_type, healthy=True, active_workflow_count=0):
+	return {
+		"executor_id": executor_id,
+		"executor_type": executor_type,
+		"healthy": healthy,
+		"active_workflow_count": active_workflow_count,
+	}
 
 
-def test_select_target_picks_a_healthy_executor():
-	executors = [
-		ExecutorRecord("exec-1", "worker", 1000, 0, 0, False),
-		ExecutorRecord("exec-2", "worker", 1000, 0, 0, False),
-	]
-	# Selection is random, so just assert it returns one of the candidates.
-	assert _select_target(executors) in executors
+def _record(executor_id, executor_type="worker", active_workflow_count=0):
+	return ExecutorRecord(executor_id, executor_type, 1000, 0, 0, False, active_workflow_count)
+
+
+def test_pick_least_loaded_returns_lowest_load():
+	candidates = ["a", "b", "c"]
+	loads = {"a": 5, "b": 2, "c": 9}
+	assert _pick_least_loaded(candidates, lambda c: loads[c]) == "b"
+
+
+def test_pick_least_loaded_tie_breaks_within_tied_set():
+	candidates = ["a", "b", "c"]
+	loads = {"a": 2, "b": 2, "c": 9}
+	# Either tied candidate is acceptable, never the heavier one.
+	assert _pick_least_loaded(candidates, lambda c: loads[c]) in {"a", "b"}
 
 
 async def test_reassignment_cycle_skips_when_no_healthy_targets():
@@ -43,7 +56,7 @@ async def test_reassignment_cycle_skips_when_no_healthy_targets():
 		monitor_postgres_connection_uri="postgresql://x",
 	)
 
-	unhealthy = [ExecutorRecord("dead-exec", "worker", 1000, 0, 0, False)]
+	unhealthy = [_record("dead-exec")]
 
 	monitor_db = AsyncMock()
 	monitor_db.get_unhealthy_executors.return_value = unhealthy
@@ -65,8 +78,8 @@ async def test_reassignment_cycle_reassigns_to_healthy_target():
 		monitor_postgres_connection_uri="postgresql://x",
 	)
 
-	unhealthy = [ExecutorRecord("dead-exec", "worker", 1000, 0, 0, False)]
-	healthy = [ExecutorRecord("alive-exec", "worker", 1000, 0, 0, False)]
+	unhealthy = [_record("dead-exec")]
+	healthy = [_record("alive-exec")]
 
 	monitor_db = AsyncMock()
 	monitor_db.get_unhealthy_executors.return_value = unhealthy
@@ -95,8 +108,8 @@ async def test_reassignment_cycle_removes_executor_even_with_no_workflows():
 		monitor_postgres_connection_uri="postgresql://x",
 	)
 
-	unhealthy = [ExecutorRecord("dead-exec", "worker", 1000, 0, 0, False)]
-	healthy = [ExecutorRecord("alive-exec", "worker", 1000, 0, 0, False)]
+	unhealthy = [_record("dead-exec")]
+	healthy = [_record("alive-exec")]
 
 	monitor_db = AsyncMock()
 	monitor_db.get_unhealthy_executors.return_value = unhealthy
@@ -122,8 +135,8 @@ async def test_reassignment_cycle_drains_in_batches_within_one_call():
 		reassignment_max_batch_size=2,
 	)
 
-	unhealthy = [ExecutorRecord("dead-exec", "worker", 1000, 0, 0, False)]
-	healthy = [ExecutorRecord("alive-exec", "worker", 1000, 0, 0, False)]
+	unhealthy = [_record("dead-exec")]
+	healthy = [_record("alive-exec")]
 
 	monitor_db = AsyncMock()
 	monitor_db.get_unhealthy_executors.return_value = unhealthy
@@ -138,6 +151,50 @@ async def test_reassignment_cycle_drains_in_batches_within_one_call():
 	assert dbos_db.reassign_workflows.call_count == 2
 	assert monitor_db.mark_recovery_needed.call_count == 2
 	monitor_db.remove_executor.assert_called_once_with("dead-exec")
+
+
+async def test_reassignment_prefers_least_loaded_then_shifts_as_load_projects():
+	"""The lighter peer is drained into first; once the workflows assigned this cycle push its
+	projected load past the heavier peer, later batches shift to the heavier peer."""
+	config = _config(reassignment_max_batch_size=2)
+
+	monitor_db = AsyncMock()
+	monitor_db.get_unhealthy_executors.return_value = [_record("dead-exec")]
+	monitor_db.get_healthy_executors_by_type.return_value = [
+		_record("light", active_workflow_count=0),
+		_record("heavy", active_workflow_count=3),
+	]
+
+	dbos_db = AsyncMock()
+	# Two full batches (keep draining) then a short one (drained).
+	dbos_db.reassign_workflows.side_effect = [["a", "b"], ["c", "d"], ["e"]]
+
+	await _run_reassignment_cycle(config, monitor_db, dbos_db)
+
+	targets = [c.kwargs["new_executor_id"] for c in dbos_db.reassign_workflows.call_args_list]
+	# light: 0 -> picked, +2 -> picked again (2 < 3), +2 -> now 4 > 3 so heavy takes the last batch.
+	assert targets == ["light", "light", "heavy"]
+
+
+async def test_orphan_cycle_routes_to_least_loaded_peer():
+	"""With a clear load gap, all orphans of a type go to the lighter peer."""
+	monitor_db = AsyncMock()
+	monitor_db.get_all_executor_ids.return_value = ["light", "heavy"]
+	monitor_db.get_types_for_workflows.return_value = {"ingest": "worker"}
+	monitor_db.get_all_executors.return_value = [
+		_executor("light", "worker", active_workflow_count=0),
+		_executor("heavy", "worker", active_workflow_count=10),
+	]
+
+	dbos_db = AsyncMock()
+	dbos_db.get_pending_workflows_not_owned_by.return_value = [
+		{"workflow_uuid": f"wf-{i}", "name": "ingest", "executor_id": "ghost"} for i in range(3)
+	]
+	dbos_db.reassign_workflow_ids.side_effect = lambda uuids, target: uuids
+
+	await _run_orphan_cycle(_config(), monitor_db, dbos_db)
+
+	dbos_db.reassign_workflow_ids.assert_called_once_with(["wf-0", "wf-1", "wf-2"], "light")
 
 
 def test_config_from_env(monkeypatch):

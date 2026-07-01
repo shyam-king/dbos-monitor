@@ -24,6 +24,20 @@ def _default_dbos_recovery():
 		dbos._executor.submit(startup_recovery_thread, dbos, workflow_ids)
 
 
+def _default_active_workflow_count() -> int:
+	"""Number of workflows this executor has currently taken up for execution.
+
+	DBOS exposes no public API for this; it tracks the in-process active set internally,
+	so we read that set the same way the recovery default reaches into DBOS internals.
+	"""
+	from dbos._dbos import _get_dbos_instance
+
+	dbos = _get_dbos_instance()
+	if dbos is None:
+		return 0
+	return len(dbos._active_workflows_set.activeList())
+
+
 class DBOSMonitorClient:
 	def __init__(
 		self,
@@ -32,12 +46,14 @@ class DBOSMonitorClient:
 		executor_type: str,
 		health_ping_interval_ms: int,
 		on_recovery_needed=_default_dbos_recovery,
+		active_workflow_count=_default_active_workflow_count,
 	):
 		self._monitor_url = monitor_url.rstrip("/")
 		self._executor_id = executor_id
 		self._executor_type = executor_type
 		self._ping_interval_ms = health_ping_interval_ms
 		self._on_recovery_needed = on_recovery_needed
+		self._active_workflow_count = active_workflow_count
 		self._running = False
 		self._thread: threading.Thread | None = None
 
@@ -72,6 +88,7 @@ class DBOSMonitorClient:
 					"executor_type": self._executor_type,
 					"health_ping_interval_ms": self._ping_interval_ms,
 					"workflow_mappings": get_workflow_mappings(),
+					"active_workflow_count": self._get_active_workflow_count(),
 				},
 				timeout=5.0,
 			)
@@ -80,6 +97,13 @@ class DBOSMonitorClient:
 		except httpx.HTTPError:
 			logger.warning("Failed to send heartbeat to %s", self._monitor_url)
 			return None
+
+	def _get_active_workflow_count(self) -> int:
+		try:
+			return self._active_workflow_count()
+		except Exception:
+			logger.warning("Failed to read active workflow count; reporting 0")
+			return 0
 
 	def _trigger_recovery(self):
 		logger.info("Recovery needed for executor %s", self._executor_id)

@@ -10,8 +10,12 @@ CREATE TABLE IF NOT EXISTS executors (
     health_ping_interval_ms INT NOT NULL,
     last_ping_at BIGINT NOT NULL,
     first_seen_at BIGINT NOT NULL,
-    recovery_needed BOOLEAN DEFAULT FALSE
+    recovery_needed BOOLEAN DEFAULT FALSE,
+    active_workflow_count BIGINT NOT NULL DEFAULT 0
 );
+
+-- Migrate executors tables created before active_workflow_count existed.
+ALTER TABLE executors ADD COLUMN IF NOT EXISTS active_workflow_count BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS workflow_type_mapping (
     workflow_name TEXT PRIMARY KEY,
@@ -29,6 +33,7 @@ class ExecutorRecord:
 	last_ping_at: int
 	first_seen_at: int
 	recovery_needed: bool
+	active_workflow_count: int
 
 
 class MonitorDB:
@@ -46,21 +51,32 @@ class MonitorDB:
 		if self._pool:
 			await self._pool.close()
 
-	async def upsert_executor(self, executor_id: str, executor_type: str, ping_interval_ms: int) -> bool:
+	async def upsert_executor(
+		self, executor_id: str, executor_type: str, ping_interval_ms: int, active_workflow_count: int = 0
+	) -> bool:
 		"""Record a heartbeat. Returns True if this executor was newly discovered (inserted)."""
 		now_ms = _now_ms()
 		async with self._pool.connection() as conn:
 			row = await (
 				await conn.execute(
 					"""
-                INSERT INTO executors (executor_id, executor_type, health_ping_interval_ms, last_ping_at, first_seen_at)
-                VALUES (%(id)s, %(type)s, %(interval)s, %(now)s, %(now)s)
+                INSERT INTO executors
+                    (executor_id, executor_type, health_ping_interval_ms,
+                     last_ping_at, first_seen_at, active_workflow_count)
+                VALUES (%(id)s, %(type)s, %(interval)s, %(now)s, %(now)s, %(active)s)
                 ON CONFLICT (executor_id) DO UPDATE SET
                     last_ping_at = %(now)s,
-                    health_ping_interval_ms = %(interval)s
+                    health_ping_interval_ms = %(interval)s,
+                    active_workflow_count = %(active)s
                 RETURNING (xmax = 0) AS inserted
                 """,
-					{"id": executor_id, "type": executor_type, "interval": ping_interval_ms, "now": now_ms},
+					{
+						"id": executor_id,
+						"type": executor_type,
+						"interval": ping_interval_ms,
+						"now": now_ms,
+						"active": active_workflow_count,
+					},
 				)
 			).fetchone()
 			return bool(row[0])
@@ -87,7 +103,7 @@ class MonitorDB:
 				await conn.execute(
 					"""
                     SELECT executor_id, executor_type, health_ping_interval_ms,
-                           last_ping_at, first_seen_at, recovery_needed
+                           last_ping_at, first_seen_at, recovery_needed, active_workflow_count
                     FROM executors
                     WHERE (last_ping_at + health_ping_interval_ms + %(grace)s) < %(now)s
                        OR (first_seen_at = last_ping_at AND (first_seen_at + %(unknown)s) < %(now)s)
@@ -103,6 +119,7 @@ class MonitorDB:
 					last_ping_at=r[3],
 					first_seen_at=r[4],
 					recovery_needed=r[5],
+					active_workflow_count=r[6],
 				)
 				for r in rows
 			]
@@ -114,7 +131,7 @@ class MonitorDB:
 				await conn.execute(
 					"""
                     SELECT executor_id, executor_type, health_ping_interval_ms,
-                           last_ping_at, first_seen_at, recovery_needed
+                           last_ping_at, first_seen_at, recovery_needed, active_workflow_count
                     FROM executors
                     WHERE executor_type = %(type)s
                       AND (last_ping_at + health_ping_interval_ms + %(grace)s) >= %(now)s
@@ -130,6 +147,7 @@ class MonitorDB:
 					last_ping_at=r[3],
 					first_seen_at=r[4],
 					recovery_needed=r[5],
+					active_workflow_count=r[6],
 				)
 				for r in rows
 			]
@@ -199,7 +217,7 @@ class MonitorDB:
 				await conn.execute(
 					"""
                     SELECT executor_id, executor_type, health_ping_interval_ms,
-                           last_ping_at, first_seen_at,
+                           last_ping_at, first_seen_at, active_workflow_count,
                            (last_ping_at + health_ping_interval_ms + %(grace)s) >= %(now)s AS healthy
                     FROM executors
                     """,
@@ -213,7 +231,8 @@ class MonitorDB:
 					"health_ping_interval_ms": r[2],
 					"last_ping_at": r[3],
 					"first_seen_at": r[4],
-					"healthy": r[5],
+					"active_workflow_count": r[5],
+					"healthy": r[6],
 				}
 				for r in rows
 			]

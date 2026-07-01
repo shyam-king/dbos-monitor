@@ -245,7 +245,14 @@ async def test_reassignment_drains_in_batches(running_app, postgres_url):
 # --- Orphan assignment via explicit workflow-type mapping ---
 
 
-async def _register(client, executor_id: str, executor_type: str, interval_ms: int = 5000, workflow_mappings=None):
+async def _register(
+	client,
+	executor_id: str,
+	executor_type: str,
+	interval_ms: int = 5000,
+	workflow_mappings=None,
+	active_workflow_count: int = 0,
+):
 	resp = await client.post(
 		"/heartbeat",
 		json={
@@ -253,10 +260,20 @@ async def _register(client, executor_id: str, executor_type: str, interval_ms: i
 			"executor_type": executor_type,
 			"health_ping_interval_ms": interval_ms,
 			"workflow_mappings": workflow_mappings or {},
+			"active_workflow_count": active_workflow_count,
 		},
 	)
 	assert resp.status_code == 200
 	return resp
+
+
+async def test_heartbeat_persists_active_workflow_count(running_app, postgres_url):
+	"""The active count reported in a heartbeat round-trips into the executor's stored state."""
+	client, config, monitor_db, dbos_db = running_app
+	await _register(client, "worker-1", "worker", active_workflow_count=7)
+
+	healthy = await monitor_db.get_healthy_executors_by_type("worker", grace_timeout_ms=5000)
+	assert [e.active_workflow_count for e in healthy if e.executor_id == "worker-1"] == [7]
 
 
 async def test_heartbeat_persists_workflow_mapping(running_app, postgres_url):

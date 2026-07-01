@@ -56,7 +56,9 @@ def _register_routes(app: FastAPI):
 	@app.post("/heartbeat", response_model=HeartbeatResponse)
 	async def heartbeat(req: HeartbeatRequest):
 		monitor_db: MonitorDB = app.state.monitor_db
-		is_new = await monitor_db.upsert_executor(req.executor_id, req.executor_type, req.health_ping_interval_ms)
+		is_new = await monitor_db.upsert_executor(
+			req.executor_id, req.executor_type, req.health_ping_interval_ms, req.active_workflow_count
+		)
 		await monitor_db.upsert_workflow_mappings(req.workflow_mappings)
 		if is_new:
 			logger.info(
